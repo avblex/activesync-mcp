@@ -94,6 +94,80 @@ func TestCalendarListEvents(t *testing.T) {
 	}
 }
 
+func TestCalendarDateWindow(t *testing.T) {
+	for _, tc := range []struct {
+		in        string
+		want      eas.FilterType
+		applied   string
+		broadened bool
+	}{
+		{"", eas.FilterTwoWeek, "2w", false},
+		{"none", eas.FilterNone, "none", false},
+		{"1d", eas.FilterTwoWeek, "2w", true},
+		{"3d", eas.FilterTwoWeek, "2w", true},
+		{"1w", eas.FilterTwoWeek, "2w", true},
+		{"2w", eas.FilterTwoWeek, "2w", false},
+		{"1m", eas.FilterOneMonth, "1m", false},
+		{"3m", eas.FilterThreeMonth, "3m", false},
+		{"6m", eas.FilterSixMonth, "6m", false},
+		{"bogus", eas.FilterTwoWeek, "2w", false},
+	} {
+		f, applied, broadened := calendarDateWindow(tc.in)
+		if f != tc.want || applied != tc.applied || broadened != tc.broadened {
+			t.Errorf("calendarDateWindow(%q) = (%d, %q, %v), want (%d, %q, %v)",
+				tc.in, f, applied, broadened, tc.want, tc.applied, tc.broadened)
+		}
+	}
+}
+
+func TestCalendarListEvents_broadensShortWindow(t *testing.T) {
+	var gotFilter eas.FilterType
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			SyncCalendarFunc: func(_ context.Context, _ string, opts eas.CalendarSyncOptions) (*eas.CalendarSyncResult, error) {
+				gotFilter = opts.DateFilter
+				return &eas.CalendarSyncResult{SyncKey: "C2"}, nil
+			},
+		},
+	}
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	out := callTool(t, s, "calendar_list_events", CalendarListEventsInput{
+		Account: "alpha", FolderID: "cal-id", DateWindow: "1d",
+	})
+	if gotFilter != eas.FilterTwoWeek {
+		t.Errorf("server saw filter %d, want TwoWeek (1d must broaden)", gotFilter)
+	}
+	if out["date_window_applied"] != "2w" {
+		t.Errorf("date_window_applied = %v, want \"2w\"", out["date_window_applied"])
+	}
+}
+
+func TestCalendarListEvents_supportedWindowUnflagged(t *testing.T) {
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			SyncCalendarFunc: func(_ context.Context, _ string, opts eas.CalendarSyncOptions) (*eas.CalendarSyncResult, error) {
+				if opts.DateFilter != eas.FilterOneMonth {
+					t.Errorf("server saw filter %d, want OneMonth", opts.DateFilter)
+				}
+				return &eas.CalendarSyncResult{SyncKey: "C2"}, nil
+			},
+		},
+	}
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	out := callTool(t, s, "calendar_list_events", CalendarListEventsInput{
+		Account: "alpha", FolderID: "cal-id", DateWindow: "1m",
+	})
+	if _, present := out["date_window_applied"]; present {
+		t.Errorf("date_window_applied present (%v) for a supported window", out["date_window_applied"])
+	}
+}
+
 func TestCalendarRespondInvite_validation(t *testing.T) {
 	mock := &easmock.Client{
 		CalendarClient: easmock.CalendarClient{

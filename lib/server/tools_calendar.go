@@ -114,6 +114,35 @@ type CalendarListEventsOutput struct {
 	Events        []EventRow `json:"events"`
 	MoreAvailable bool       `json:"more_available"`
 	SyncCursor    string     `json:"sync_cursor"`
+	// DateWindowApplied reports the window the server actually filtered
+	// with. It differs from the requested date_window when the request
+	// asked for a span the calendar collection does not support (see
+	// calendarDateWindow) — e.g. "1d" comes back as "2w".
+	DateWindowApplied string `json:"date_window_applied,omitempty"`
+}
+
+// calendarDateWindow maps a requested window onto the closest supported
+// calendar window. MS-ASAIRS §2.2.2.5 defines the calendar FilterType set
+// as None/TwoWeek/OneMonth/ThreeMonth/SixMonth — there are no one-day,
+// three-day, or one-week calendar filters, and Exchange rejects them with
+// Sync status 4 (ProtocolError). Short requests silently broaden to two
+// weeks; the caller sees the substitution in date_window_applied.
+func calendarDateWindow(s string) (eas.FilterType, string, bool) {
+	switch s {
+	case "", "2w":
+		return eas.FilterTwoWeek, "2w", false
+	case "none":
+		return eas.FilterNone, "none", false
+	case "1d", "3d", "1w":
+		return eas.FilterTwoWeek, "2w", true
+	case "1m":
+		return eas.FilterOneMonth, "1m", false
+	case "3m":
+		return eas.FilterThreeMonth, "3m", false
+	case "6m":
+		return eas.FilterSixMonth, "6m", false
+	}
+	return eas.FilterTwoWeek, "2w", false
 }
 
 func registerCalendarListEvents(s *mcp.Server, m *Manager, accounts []string) {
@@ -131,9 +160,10 @@ func registerCalendarListEvents(s *mcp.Server, m *Manager, accounts []string) {
 		if err := m.PrepareListCursor(ctx, in.Account, in.FolderID, in.Cursor); err != nil {
 			return nil, CalendarListEventsOutput{}, fmt.Errorf("PrepareListCursor: %w", err)
 		}
+		filter, applied, broadened := calendarDateWindow(in.DateWindow)
 		res, err := c.SyncCalendar(ctx, in.FolderID, eas.CalendarSyncOptions{
 			WindowSize: in.WindowSize,
-			DateFilter: parseDateWindow(in.DateWindow),
+			DateFilter: filter,
 		})
 		if err != nil {
 			return nil, CalendarListEventsOutput{}, fmt.Errorf("SyncCalendar: %w", err)
@@ -141,6 +171,9 @@ func registerCalendarListEvents(s *mcp.Server, m *Manager, accounts []string) {
 		out := CalendarListEventsOutput{
 			MoreAvailable: res.MoreAvailable,
 			SyncCursor:    res.SyncKey,
+		}
+		if broadened {
+			out.DateWindowApplied = applied
 		}
 		for _, ev := range res.Added {
 			out.Events = append(out.Events, eventRowFrom(ev))
