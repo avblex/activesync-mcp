@@ -358,6 +358,9 @@ func (c *httpClient) CreateEvent(ctx context.Context, folderID string, draft Eve
 		return "", err
 	}
 	// Look for Responses/Add with ClientId match → return the server id.
+	// MS-ASCMD §2.2.3.7: a failed Add carries its own <Status> (and no
+	// ServerId) even when the collection Status is 1 — ignoring it made a
+	// rejected create look like a success.
 	if collection := resp.Find("Collection"); collection != nil {
 		if responses := findShallow(collection, "Responses", 1); responses != nil {
 			for _, r := range responses.Children {
@@ -366,14 +369,22 @@ func (c *httpClient) CreateEvent(ctx context.Context, folderID string, draft Eve
 					continue
 				}
 				cid := re.Find("ClientId")
-				sid := re.Find("ServerId")
-				if cid != nil && cid.TextContent() == clientID && sid != nil {
+				if cid == nil || cid.TextContent() != clientID {
+					continue
+				}
+				if st := re.Find("Status"); st != nil {
+					if code := atoi(st.TextContent()); code != 0 && code != StatusOK {
+						return "", &StatusError{Command: "Sync", Code: code}
+					}
+				}
+				if sid := re.Find("ServerId"); sid != nil {
 					return sid.TextContent(), nil
 				}
+				return "", errors.New("eas: CreateEvent: server accepted the Add but returned no ServerId")
 			}
 		}
 	}
-	return clientID, nil
+	return "", errors.New("eas: CreateEvent: server response missing Responses/Add for the sent ClientId")
 }
 
 // UpdateEvent modifies an existing event identified by serverID. Only the
@@ -392,8 +403,11 @@ func (c *httpClient) UpdateEvent(ctx context.Context, folderID, serverID string,
 			app,
 		),
 	)
-	_, err := c.sendSyncCommands(ctx, folderID, cmds)
-	return err
+	resp, err := c.sendSyncCommands(ctx, folderID, cmds)
+	if err != nil {
+		return err
+	}
+	return itemResponseError(resp, "Change", serverID)
 }
 
 // DeleteEvent removes an event identified by serverID.
@@ -409,8 +423,46 @@ func (c *httpClient) DeleteEvent(ctx context.Context, folderID, serverID string)
 			wbxml.E(wbxml.PageAirSync, "ServerId", wbxml.Text(serverID)),
 		),
 	)
-	_, err := c.sendSyncCommands(ctx, folderID, cmds)
-	return err
+	resp, err := c.sendSyncCommands(ctx, folderID, cmds)
+	if err != nil {
+		return err
+	}
+	return itemResponseError(resp, "Delete", serverID)
+}
+
+// itemResponseError inspects a Sync response for the per-item <Status> of
+// the Responses/<cmdName> element matching serverID (MS-ASCMD §2.2.3.24,
+// §2.2.3.42). A failed item carries its own Status even when the
+// collection Status is 1. Lenient by design: a missing response element
+// is not treated as an error — some servers omit it on success.
+func itemResponseError(respRoot *wbxml.Element, cmdName, serverID string) error {
+	if respRoot == nil {
+		return nil
+	}
+	collection := respRoot.Find("Collection")
+	if collection == nil {
+		return nil
+	}
+	responses := findShallow(collection, "Responses", 1)
+	if responses == nil {
+		return nil
+	}
+	for _, r := range responses.Children {
+		re, ok := r.(*wbxml.Element)
+		if !ok || re.Name != cmdName {
+			continue
+		}
+		if sid := re.Find("ServerId"); sid == nil || sid.TextContent() != serverID {
+			continue
+		}
+		if st := re.Find("Status"); st != nil {
+			if code := atoi(st.TextContent()); code != 0 && code != StatusOK {
+				return &StatusError{Command: "Sync", Code: code}
+			}
+		}
+		return nil
+	}
+	return nil
 }
 
 // sendSyncCommands wraps a Commands subtree in a Sync request, sends it,
@@ -455,44 +507,106 @@ func (c *httpClient) sendSyncCommands(ctx context.Context, folderID string, cmds
 	return resp.Root, nil
 }
 
+// buildEventApp renders a draft as an ApplicationData element. MS-ASAIRS
+// §20 requires child elements in ascending tag-ID order; Exchange rejects
+// unordered calendar items with item status 6 (ConversionError). Calendar
+// page order: TimeZone 0x05, AllDayEvent 0x06, Attendees 0x07, BusyStatus
+// 0x0D, EndTime 0x12, Exceptions 0x14, Location 0x17, MeetingStatus 0x18,
+// Recurrence 0x1B, Reminder 0x24, Sensitivity 0x25, Subject 0x26,
+// StartTime 0x27, UID 0x28. The AirSyncBase Body element follows last
+// (separate codepage, sent after the calendar page content).
 func buildEventApp(draft EventDraft) *wbxml.Element {
 	app := wbxml.E(wbxml.PageAirSync, "ApplicationData")
-	if draft.Subject != "" {
-		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "Subject", wbxml.Text(draft.Subject)))
+	switch {
+	case draft.TimeZoneRaw != "":
+		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "TimeZone",
+			wbxml.Text(draft.TimeZoneRaw)))
+	case draft.TimeZone != nil:
+		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "TimeZone",
+			wbxml.Text(draft.TimeZone.Encode())))
 	}
-	if draft.Location != "" {
-		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "Location", wbxml.Text(draft.Location)))
-	}
-	if !draft.StartTime.IsZero() {
-		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "StartTime", wbxml.Text(formatEASTime(draft.StartTime))))
-	}
-	if !draft.EndTime.IsZero() {
-		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "EndTime", wbxml.Text(formatEASTime(draft.EndTime))))
-	}
+	// AllDayEvent (0x06) — required on Add; "0" for timed events.
 	if draft.AllDayEvent {
 		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "AllDayEvent", wbxml.Text("1")))
+	} else {
+		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "AllDayEvent", wbxml.Text("0")))
 	}
-	app.Children = append(app.Children,
-		wbxml.E(wbxml.PageCalendar, "BusyStatus", wbxml.Text(itoa(draft.BusyStatus))),
-		wbxml.E(wbxml.PageCalendar, "Sensitivity", wbxml.Text(itoa(draft.Sensitivity))),
-	)
-	if draft.Reminder > 0 {
-		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "Reminder", wbxml.Text(itoa(draft.Reminder))))
-	}
+	// Attendees (0x07)
 	if len(draft.Attendees) > 0 {
 		atts := wbxml.E(wbxml.PageCalendar, "Attendees")
 		for _, a := range draft.Attendees {
 			at := wbxml.E(wbxml.PageCalendar, "Attendee")
-			if a.Name != "" {
-				at.Children = append(at.Children, wbxml.E(wbxml.PageCalendar, "Name", wbxml.Text(a.Name)))
-			}
 			if a.Email != "" {
 				at.Children = append(at.Children, wbxml.E(wbxml.PageCalendar, "Email", wbxml.Text(a.Email)))
+			}
+			if a.Name != "" {
+				at.Children = append(at.Children, wbxml.E(wbxml.PageCalendar, "Name", wbxml.Text(a.Name)))
 			}
 			atts.Children = append(atts.Children, at)
 		}
 		app.Children = append(app.Children, atts)
 	}
+	// BusyStatus (0x0D), DTStamp (0x11), EndTime (0x12)
+	app.Children = append(app.Children,
+		wbxml.E(wbxml.PageCalendar, "BusyStatus", wbxml.Text(itoa(draft.BusyStatus))))
+	// DTStamp is the item last-change stamp; Exchange requires it on
+	// calendar Add, Z-Push does not.
+	app.Children = append(app.Children,
+		wbxml.E(wbxml.PageCalendar, "DTStamp", wbxml.Text(formatEASTime(time.Now().UTC()))))
+	if !draft.EndTime.IsZero() {
+		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "EndTime", wbxml.Text(formatEASTime(draft.EndTime))))
+	}
+	// Exceptions (0x14)
+	if len(draft.Exceptions) > 0 {
+		exc := wbxml.E(wbxml.PageCalendar, "Exceptions")
+		for _, x := range draft.Exceptions {
+			exc.Children = append(exc.Children, exceptionToWBXML(x))
+		}
+		app.Children = append(app.Children, exc)
+	}
+	// Location (0x17)
+	if draft.Location != "" {
+		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "Location", wbxml.Text(draft.Location)))
+	}
+	// MeetingStatus (0x18) — required on Add. 0 = appointment,
+	// 1 = meeting (attendees present, no responses yet).
+	meetingStatus := 0
+	if len(draft.Attendees) > 0 {
+		meetingStatus = 1
+	}
+	app.Children = append(app.Children,
+		wbxml.E(wbxml.PageCalendar, "MeetingStatus", wbxml.Text(itoa(meetingStatus))))
+	// Recurrence (0x1B)
+	if rec := recurrenceToWBXML(draft.Recurrence); rec != nil {
+		app.Children = append(app.Children, rec)
+	}
+	// Reminder (0x24), Sensitivity (0x25)
+	if draft.Reminder > 0 {
+		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "Reminder", wbxml.Text(itoa(draft.Reminder))))
+	}
+	app.Children = append(app.Children,
+		wbxml.E(wbxml.PageCalendar, "Sensitivity", wbxml.Text(itoa(draft.Sensitivity))))
+	// Subject (0x26), StartTime (0x27)
+	if draft.Subject != "" {
+		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "Subject", wbxml.Text(draft.Subject)))
+	}
+	if !draft.StartTime.IsZero() {
+		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "StartTime", wbxml.Text(formatEASTime(draft.StartTime))))
+	}
+	// UID (0x28) — EAS requires a GUID-shaped UID for new events.
+	uid := newEventUID()
+	app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "UID", wbxml.Text(uid)))
+	// ResponseRequested (0x34) — sent by every major EAS client on Add.
+	// ClientUid (0x3C) is deliberately not sent: it was introduced after
+	// EAS 14.1 and Exchange rejects it on calendar Add/Change with item
+	// status 6 (ConversionError).
+	responseRequested := "0"
+	if meetingStatus == 1 {
+		responseRequested = "1"
+	}
+	app.Children = append(app.Children,
+		wbxml.E(wbxml.PageCalendar, "ResponseRequested", wbxml.Text(responseRequested)))
+	// AirSyncBase Body — separate codepage, after the calendar content.
 	if draft.Body != "" {
 		app.Children = append(app.Children,
 			wbxml.E(wbxml.PageAirSyncBase, "Body",
@@ -501,34 +615,27 @@ func buildEventApp(draft EventDraft) *wbxml.Element {
 			),
 		)
 	}
-	if draft.TimeZoneRaw != "" {
-		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "TimeZone",
-			wbxml.Text(draft.TimeZoneRaw)))
-	} else if draft.TimeZone != nil {
-		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "TimeZone",
-			wbxml.Text(draft.TimeZone.Encode())))
-	}
-	if rec := recurrenceToWBXML(draft.Recurrence); rec != nil {
-		app.Children = append(app.Children, rec)
-	}
-	if len(draft.Exceptions) > 0 {
-		exc := wbxml.E(wbxml.PageCalendar, "Exceptions")
-		for _, x := range draft.Exceptions {
-			exc.Children = append(exc.Children, exceptionToWBXML(x))
-		}
-		app.Children = append(app.Children, exc)
-	}
-	// EAS requires a UID for new events; compute a stable one if absent.
-	app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "UID", wbxml.Text(newEventUID())))
 	return app
 }
 
 func formatEASTime(t time.Time) string {
-	return t.UTC().Format("2006-01-02T15:04:05.000Z")
+	// Calendar item datetimes must use the iCalendar compact form
+	// "YYYYMMDDTHHMMSSZ" — the same form Exchange itself emits in Sync
+	// responses. The dashed "YYYY-MM-DDTHH:MM:SSZ" form from MS-ASAIRS
+	// examples parses on mail items but makes Exchange reject a calendar
+	// Add/Change with item status 6 (ConversionError). Z-Push accepts
+	// both forms.
+	return t.UTC().Format("20060102T150405Z")
 }
 
 func newEventUID() string {
+	// RFC 4122 v4 random GUID. Outlook/EAS clients use GUIDs for calendar
+	// UIDs; Exchange rejects non-GUID-shaped UIDs on Add with item
+	// status 6 (ConversionError).
 	buf := make([]byte, 16)
 	_, _ = rand.Read(buf)
-	return "asmcp-" + hex.EncodeToString(buf)
+	buf[6] = (buf[6] & 0x0F) | 0x40 // version 4
+	buf[8] = (buf[8] & 0x3F) | 0x80 // variant 1
+	h := hex.EncodeToString(buf)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }

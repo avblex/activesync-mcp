@@ -391,6 +391,12 @@ func draftFromInput(in CalendarCreateEventInput) eas.EventDraft {
 		AllDayEvent: in.AllDay,
 		BusyStatus:  in.BusyStatus,
 		Reminder:    in.ReminderMin,
+		// Exchange requires a TimeZone on calendar Add, and its item
+		// converter rejects the all-zero UTC blob with item status 6
+		// (ConversionError) — the zero SYSTEMTIME rules are not a valid
+		// TIME_ZONE_INFORMATION to Exchange. Use the machine's local
+		// zone, which always encodes a real bias and name.
+		TimeZoneRaw: eas.EncodeTimeZone(time.Local),
 	}
 	for _, a := range in.Attendees {
 		d.Attendees = append(d.Attendees, eas.EventAttendee{Name: a.Name, Email: a.Email})

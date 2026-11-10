@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/hstern/go-activesync/wbxml"
 )
@@ -119,6 +120,56 @@ func TestSyncCalendarPersistsKeyOnFailedStatus(t *testing.T) {
 	}
 	if got, _ := state.SyncKey(context.Background(), "calendar"); got != "server-offered-key" {
 		t.Errorf("stored key = %q, want server-offered-key (failed sync must not strand server state)", got)
+	}
+}
+
+func TestCreateEventSurfacesItemStatus(t *testing.T) {
+	state := NewMemoryState()
+	if err := state.SetSyncKey(context.Background(), "calendar", "existing-key"); err != nil {
+		t.Fatal(err)
+	}
+	client := newSyncTestClient(t, state, func(w http.ResponseWriter, r *http.Request) {
+		// Echo the request's ClientId, Collection Status=1, but the Add
+		// itself failed (status 6) with no ServerId — the shape Exchange
+		// uses to reject a calendar create.
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+			return
+		}
+		req, err := wbxml.Unmarshal(body, wbxml.DefaultRegistry())
+		if err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		cid := req.Root.Find("ClientId")
+		if cid == nil {
+			t.Error("request missing ClientId")
+			return
+		}
+		response := &wbxml.Document{Root: wbxml.E(wbxml.PageAirSync, "Sync",
+			wbxml.E(wbxml.PageAirSync, "Collections",
+				wbxml.E(wbxml.PageAirSync, "Collection",
+					wbxml.E(wbxml.PageAirSync, "SyncKey", wbxml.Text("next-key")),
+					wbxml.E(wbxml.PageAirSync, "CollectionId", wbxml.Text("calendar")),
+					wbxml.E(wbxml.PageAirSync, "Status", wbxml.Text("1")),
+					wbxml.E(wbxml.PageAirSync, "Responses",
+						wbxml.E(wbxml.PageAirSync, "Add",
+							wbxml.E(wbxml.PageAirSync, "ClientId", wbxml.Text(cid.TextContent())),
+							wbxml.E(wbxml.PageAirSync, "Status", wbxml.Text("6")))))))}
+		encoded, err := wbxml.Marshal(response, wbxml.DefaultRegistry())
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
+		_, _ = w.Write(encoded)
+	})
+	start := time.Now()
+	_, err := client.CreateEvent(context.Background(), "calendar", EventDraft{
+		StartTime: start, EndTime: start.Add(time.Hour), Subject: "x",
+	})
+	if !IsStatusCode(err, 6) {
+		t.Fatalf("err = %v, want status 6 (per-item Add failure must not look like success)", err)
 	}
 }
 
