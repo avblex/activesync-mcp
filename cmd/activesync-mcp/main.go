@@ -176,7 +176,7 @@ func scopeConfiguredDeviceIDs(cfg *config.Config, slot int) {
 
 // loadConfigOrHint wraps config.Load: on a "file not found" error it
 // prints a copy-pasteable bootstrap walkthrough on stderr (so a user
-// invoking `serve`/`doctor`/`keyring` for the first time isn't left
+// invoking `serve`/`doctor` for the first time isn't left
 // with a bare "no such file" message). On any other error it prints
 // the error verbatim. In either case the returned err is non-nil and
 // the caller should return exitConfig.
