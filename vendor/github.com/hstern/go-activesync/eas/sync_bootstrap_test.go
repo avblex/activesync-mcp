@@ -94,6 +94,34 @@ func TestSyncCalendarBootstrapPropagatesFetchError(t *testing.T) {
 	}
 }
 
+func TestSyncCalendarPersistsKeyOnFailedStatus(t *testing.T) {
+	state := NewMemoryState()
+	if err := state.SetSyncKey(context.Background(), "calendar", "existing-key"); err != nil {
+		t.Fatal(err)
+	}
+	client := newSyncTestClient(t, state, func(w http.ResponseWriter, _ *http.Request) {
+		response := &wbxml.Document{Root: wbxml.E(wbxml.PageAirSync, "Sync",
+			wbxml.E(wbxml.PageAirSync, "Collections",
+				wbxml.E(wbxml.PageAirSync, "Collection",
+					wbxml.E(wbxml.PageAirSync, "SyncKey", wbxml.Text("server-offered-key")),
+					wbxml.E(wbxml.PageAirSync, "CollectionId", wbxml.Text("calendar")),
+					wbxml.E(wbxml.PageAirSync, "Status", wbxml.Text("4")))))}
+		encoded, err := wbxml.Marshal(response, wbxml.DefaultRegistry())
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
+		_, _ = w.Write(encoded)
+	})
+	_, err := client.SyncCalendar(context.Background(), "calendar", CalendarSyncOptions{})
+	if !IsStatusCode(err, 4) {
+		t.Fatalf("err = %v, want status 4", err)
+	}
+	if got, _ := state.SyncKey(context.Background(), "calendar"); got != "server-offered-key" {
+		t.Errorf("stored key = %q, want server-offered-key (failed sync must not strand server state)", got)
+	}
+}
+
 func newSyncTestClient(t *testing.T, state StateStore, handler http.HandlerFunc) Client {
 	t.Helper()
 	server := httptest.NewServer(handler)

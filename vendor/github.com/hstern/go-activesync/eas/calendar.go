@@ -174,15 +174,26 @@ func (c *httpClient) syncCalendarOnce(ctx context.Context, folderID string, opts
 	if respCollection == nil {
 		return nil, errors.New("eas: SyncCalendar: response missing <Collection>")
 	}
+	// A server may hand us a fresh SyncKey alongside a failed collection
+	// Status (MS-ASCMD §2.2.3.29: SyncKey and Status are siblings). Persist
+	// it before bailing out: dropping it strands the server-side sync state
+	// and the next request fails with 132/135 (SyncStateNotFound /
+	// SyncStateAlreadyExists) instead of recovering with a plain resync.
+	var respKey string
+	if k := findShallow(respCollection, "SyncKey", 1); k != nil {
+		respKey = k.TextContent()
+	}
 	if cs := findShallow(respCollection, "Status", 1); cs != nil {
 		if code := atoi(cs.TextContent()); code != 0 && code != StatusOK {
+			if respKey != "" {
+				if err := c.cfg.State.SetSyncKey(ctx, folderID, respKey); err != nil {
+					return nil, fmt.Errorf("eas: SyncCalendar: persist key: %w", err)
+				}
+			}
 			return nil, &StatusError{Command: "Sync", Code: code}
 		}
 	}
-	out := &CalendarSyncResult{}
-	if k := findShallow(respCollection, "SyncKey", 1); k != nil {
-		out.SyncKey = k.TextContent()
-	}
+	out := &CalendarSyncResult{SyncKey: respKey}
 	if findShallow(respCollection, "MoreAvailable", 1) != nil {
 		out.MoreAvailable = true
 	}
