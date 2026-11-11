@@ -738,3 +738,86 @@ func TestCalendarListEvents_recurringAnchorFallback(t *testing.T) {
 		t.Errorf("anchor row id = %v, want cal-id:9", row["id"])
 	}
 }
+
+// TestExpansionWindow pins the window edges expansionWindow derives from
+// each filter, including the one-year horizon that bounds infinite series
+// under date_window=none.
+func TestExpansionWindow(t *testing.T) {
+	now := time.Date(2026, 11, 11, 15, 4, 5, 0, time.FixedZone("weird", 5*60*60))
+	start, end := expansionWindow(eas.FilterNone, now)
+	if want := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC); !start.Equal(want) {
+		t.Errorf("FilterNone start = %v, want %v (UTC midnight of now's date)", start, want)
+	}
+	if want := time.Date(2027, 11, 11, 0, 0, 0, 0, time.UTC); !end.Equal(want) {
+		t.Errorf("FilterNone end = %v, want %v (one year ahead)", end, want)
+	}
+	for _, tc := range []struct {
+		filter eas.FilterType
+		want   time.Time
+	}{
+		{eas.FilterOneDay, time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)},
+		{eas.FilterThreeDay, time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)},
+		{eas.FilterOneWeek, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)},
+		{eas.FilterTwoWeek, time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)},
+		{eas.FilterOneMonth, time.Date(2026, 12, 11, 0, 0, 0, 0, time.UTC)},
+		{eas.FilterThreeMonth, time.Date(2027, 2, 11, 0, 0, 0, 0, time.UTC)},
+		{eas.FilterSixMonth, time.Date(2027, 5, 11, 0, 0, 0, 0, time.UTC)},
+	} {
+		_, end := expansionWindow(tc.filter, now)
+		if !end.Equal(tc.want) {
+			t.Errorf("filter %d end = %v, want %v", tc.filter, end, tc.want)
+		}
+	}
+}
+
+// TestCalendarListEvents_noneWindowOneYearHorizon confirms that under
+// date_window=none an infinite series is expanded only up to the fixed
+// one-year horizon rather than to infinity.
+func TestCalendarListEvents_noneWindowOneYearHorizon(t *testing.T) {
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			SyncCalendarFunc: func(_ context.Context, _ string, _ eas.CalendarSyncOptions) (*eas.CalendarSyncResult, error) {
+				// Anchor ~3 weeks before the window opens, infinite daily.
+				anchor := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -21).Add(6 * time.Hour)
+				return &eas.CalendarSyncResult{
+					SyncKey: "C2",
+					Added: []eas.EventItem{{
+						ServerID:  "cal-id:11",
+						Subject:   "Infinite daily",
+						StartTime: anchor,
+						EndTime:   anchor.Add(time.Hour),
+						Recurrence: &eas.Recurrence{
+							Type:     eas.RecurrenceDaily,
+							Interval: 1,
+						},
+					}},
+				}, nil
+			},
+		},
+	}
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	out := callTool(t, s, "calendar_list_events", CalendarListEventsInput{
+		Account: "alpha", FolderID: "cal-id", DateWindow: "none",
+	})
+	events := out["events"].([]any)
+	if len(events) == 0 {
+		t.Fatal("infinite series produced no rows")
+	}
+	// Bounds derived the same way expansionWindow does, so the assertions
+	// stay date-independent.
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	horizon := today.AddDate(1, 0, 0)
+	for _, e := range events {
+		row := e.(map[string]any)
+		st, err := time.Parse(time.RFC3339, row["start_time"].(string))
+		if err != nil {
+			t.Fatalf("start_time %v: %v", row["start_time"], err)
+		}
+		if st.Before(today) || !st.Before(horizon) {
+			t.Errorf("row %v start_time %v outside the [%v, %v) horizon", row["id"], st, today, horizon)
+		}
+	}
+}

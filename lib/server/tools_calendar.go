@@ -388,7 +388,9 @@ func registerCalendarUpdate(s *mcp.Server, m *Manager, accounts []string) {
 	tool := &mcp.Tool{
 		Name: "calendar_update_event",
 		Description: "Modify an existing calendar event. Pass only the fields you want to change " +
-			"(except start/end time, which must both be supplied to update timing).",
+			"(except start/end time, which must both be supplied to update timing). " +
+			"For rows expanded from a recurring series, pass the bare series_id as id; " +
+			"occurrence ids (with the @date suffix) are not valid for update.",
 	}
 	scopeEnum(tool, "account", accounts)
 	mcp.AddTool(s, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in CalendarUpdateEventInput) (*mcp.CallToolResult, CalendarCreateEventOutput, error) {
@@ -432,8 +434,10 @@ type CalendarDeleteEventInput struct {
 
 func registerCalendarDelete(s *mcp.Server, m *Manager, accounts []string) {
 	tool := &mcp.Tool{
-		Name:        "calendar_delete_event",
-		Description: "Delete a calendar event by id.",
+		Name: "calendar_delete_event",
+		Description: "Delete a calendar event by id. " +
+			"For rows expanded from a recurring series, pass the bare series_id as id; " +
+			"occurrence ids (with the @date suffix) are not valid for delete.",
 	}
 	scopeEnum(tool, "account", accounts)
 	mcp.AddTool(s, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in CalendarDeleteEventInput) (*mcp.CallToolResult, CalendarCreateEventOutput, error) {
