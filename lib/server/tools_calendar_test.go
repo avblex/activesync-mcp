@@ -635,9 +635,10 @@ func TestCalendarListEvents_expandsRecurringSeries(t *testing.T) {
 	})
 	events := out["events"].([]any)
 	type row struct {
-		ID       string `json:"id"`
-		Subject  string `json:"subject"`
-		SeriesID string `json:"series_id"`
+		ID        string    `json:"id"`
+		Subject   string    `json:"subject"`
+		SeriesID  string    `json:"series_id"`
+		StartTime time.Time `json:"start_time"`
 	}
 	var rows []row
 	for _, e := range events {
@@ -646,28 +647,49 @@ func TestCalendarListEvents_expandsRecurringSeries(t *testing.T) {
 		_ = json.Unmarshal(b, &r)
 		rows = append(rows, r)
 	}
+	// Default window is [today, today+14d) in UTC: a weekly series always
+	// yields exactly two in-window Thursdays regardless of the current
+	// date. Pin the full occurrence ids, not just the prefix.
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	first := today.Add(time.Duration((int(time.Thursday)-int(today.Weekday())+7)%7) * 24 * time.Hour)
+	wantIDs := map[string]bool{
+		"cal-id:42@" + first.Format("2006-01-02"):                  false,
+		"cal-id:42@" + first.AddDate(0, 0, 7).Format("2006-01-02"): false,
+	}
 	var seriesRows, oneOff int
 	for _, r := range rows {
 		switch {
 		case r.SeriesID == "cal-id:42":
 			seriesRows++
-			if !strings.HasPrefix(r.ID, "cal-id:42@") {
-				t.Errorf("series row id %q lacks the cal-id:42@ prefix", r.ID)
+			if _, ok := wantIDs[r.ID]; !ok {
+				t.Errorf("series row id %q is not one of the expected occurrence ids", r.ID)
+			}
+			wantIDs[r.ID] = true
+			if st := r.StartTime; st.Hour() != 7 || st.Minute() != 30 || st.Location() != time.UTC {
+				t.Errorf("series row %q start_time = %v, want the anchor's 07:30 UTC time-of-day", r.ID, st)
 			}
 		case r.ID == "cal-id:7":
 			oneOff++
 			if r.SeriesID != "" {
 				t.Errorf("one-off row carries series_id %q", r.SeriesID)
 			}
+		default:
+			t.Errorf("unexpected row %+v", r)
 		}
 	}
-	// Default window is 2 weeks from today: a weekly series always yields
-	// exactly two in-window Thursdays regardless of the current date.
 	if seriesRows != 2 {
 		t.Errorf("expanded series rows = %d, want 2", seriesRows)
 	}
+	for id, seen := range wantIDs {
+		if !seen {
+			t.Errorf("expected occurrence id %q missing from the response", id)
+		}
+	}
 	if oneOff != 1 {
 		t.Errorf("one-off rows = %d, want 1", oneOff)
+	}
+	if len(rows) != seriesRows+oneOff {
+		t.Errorf("total rows = %d, want %d (series %d + one-off %d)", len(rows), seriesRows+oneOff, seriesRows, oneOff)
 	}
 }
 

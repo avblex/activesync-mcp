@@ -194,12 +194,14 @@ func registerCalendarListEvents(s *mcp.Server, m *Manager, accounts []string) {
 }
 
 // expansionWindow derives the client-side expansion window from the
-// requested date window. The right edge mirrors what the server was asked
-// about; "none" (FilterNone) has no server-side bound, so infinite series
-// get a fixed one-year horizon.
+// requested date window, computed in UTC to match the generator's date
+// semantics. The right edge mirrors what the server was asked about; "none"
+// (FilterNone) has no server-side bound, so infinite series get a fixed
+// one-year horizon.
 func expansionWindow(filter eas.FilterType, now time.Time) (time.Time, time.Time) {
-	start := now.Truncate(24 * time.Hour)
+	start := now.UTC().Truncate(24 * time.Hour)
 	var end time.Time
+	// OneDay/ThreeDay/OneWeek are unreachable today (calendarDateWindow broadens them to TwoWeek); kept defensively.
 	switch filter {
 	case eas.FilterOneDay:
 		end = start.Add(24 * time.Hour)
@@ -230,10 +232,20 @@ func eventRowsFrom(ev eas.EventItem, winStart, winEnd time.Time) []EventRow {
 		return []EventRow{eventRowFrom(ev)}
 	}
 	var rows []EventRow
+	// A modification exception can override an occurrence's StartTime, so
+	// two occurrences can land on the same UTC date; disambiguate colliding
+	// ids with a numeric suffix so every row in one response has a unique id.
+	seen := map[string]int{}
 	for _, occ := range eas.ExpandRecurrences(ev, winStart, winEnd) {
 		row := eventRowFrom(occ)
 		row.SeriesID = ev.ServerID
-		row.ID = ev.ServerID + "@" + occ.StartTime.UTC().Format("2006-01-02")
+		base := ev.ServerID + "@" + occ.StartTime.UTC().Format("2006-01-02")
+		id := base
+		if n := seen[base]; n > 0 {
+			id = fmt.Sprintf("%s-%d", base, n+1)
+		}
+		seen[base]++
+		row.ID = id
 		rows = append(rows, row)
 	}
 	if len(rows) == 0 {
