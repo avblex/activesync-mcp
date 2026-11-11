@@ -62,6 +62,12 @@ type EventAttendee struct {
 // optional except StartTime and EndTime; absent fields become "no change"
 // on update or use sensible defaults on create.
 type EventDraft struct {
+	// UID is the calendar item's iCal UID (GUID). Leave empty on create:
+	// a fresh GUID is generated. On update, carry the value the server
+	// reported so the meeting keeps its identity across a Change —
+	// Exchange replaces the whole item, and a new UID orphans the
+	// invitation / attendee association.
+	UID         string
 	Subject     string
 	Location    string
 	Body        string
@@ -387,8 +393,12 @@ func (c *httpClient) CreateEvent(ctx context.Context, folderID string, draft Eve
 	return "", errors.New("eas: CreateEvent: server response missing Responses/Add for the sent ClientId")
 }
 
-// UpdateEvent modifies an existing event identified by serverID. Only the
-// non-zero fields of draft are sent.
+// UpdateEvent modifies an existing event identified by serverID. It is a
+// read-modify-write: the event's current state is fetched first and only
+// the non-zero fields of draft are applied on top. This matters because
+// Exchange replaces the whole item on a calendar Change — sending just the
+// changed fields would silently drop everything else (subject, attendees,
+// recurrence, time zone, ...).
 func (c *httpClient) UpdateEvent(ctx context.Context, folderID, serverID string, draft EventDraft) error {
 	if folderID == "" || serverID == "" {
 		return errors.New("eas: UpdateEvent: folderID and serverID are required")
@@ -396,7 +406,12 @@ func (c *httpClient) UpdateEvent(ctx context.Context, folderID, serverID string,
 	if err := c.ensureSynced(ctx, folderID); err != nil {
 		return err
 	}
-	app := buildEventApp(draft)
+	current, err := c.FetchEvent(ctx, folderID, serverID)
+	if err != nil {
+		return fmt.Errorf("eas: UpdateEvent: fetch current state: %w", err)
+	}
+	merged := mergeEventDraft(*current, draft)
+	app := buildEventApp(merged)
 	cmds := wbxml.E(wbxml.PageAirSync, "Commands",
 		wbxml.E(wbxml.PageAirSync, "Change",
 			wbxml.E(wbxml.PageAirSync, "ServerId", wbxml.Text(serverID)),
@@ -408,6 +423,89 @@ func (c *httpClient) UpdateEvent(ctx context.Context, folderID, serverID string,
 		return err
 	}
 	return itemResponseError(resp, "Change", serverID)
+}
+
+// mergeEventDraft produces the full field set to send for a Change: the
+// event's current server state with only the non-zero fields of draft
+// applied on top. Because Exchange replaces the whole item on a calendar
+// Change, every field left at its zero value would be dropped on the
+// server; seeding from the fetched state keeps untouched fields (subject,
+// attendees, recurrence, time zone, ...) intact.
+//
+// Zero values double as the "leave unchanged" sentinel, matching EventDraft's
+// documented contract. The trade-off: a caller cannot explicitly reset a
+// field to its zero value (e.g. clear the location or set BusyStatus back to
+// free) through this path — those are indistinguishable from "not supplied".
+func mergeEventDraft(current EventItem, draft EventDraft) EventDraft {
+	merged := EventDraft{
+		Subject:     current.Subject,
+		Location:    current.Location,
+		Body:        current.Body,
+		StartTime:   current.StartTime,
+		EndTime:     current.EndTime,
+		AllDayEvent: current.AllDayEvent,
+		BusyStatus:  current.BusyStatus,
+		Sensitivity: current.Sensitivity,
+		Reminder:    current.Reminder,
+		Attendees:   current.Attendees,
+		Recurrence:  current.Recurrence,
+		Exceptions:  current.Exceptions,
+		// Round-trip the raw time-zone blob the server reported (byte
+		// identical). Do NOT fall back to the parsed current.TimeZone:
+		// when the server omitted it that struct is zero-valued, and the
+		// zero SYSTEMTIME blob is rejected by Exchange (item status 6).
+		TimeZoneRaw: current.TimeZoneRaw,
+		UID:         current.UID,
+	}
+	if draft.Subject != "" {
+		merged.Subject = draft.Subject
+	}
+	if draft.Location != "" {
+		merged.Location = draft.Location
+	}
+	if draft.Body != "" {
+		merged.Body = draft.Body
+	}
+	// Timing is all-or-nothing per the tool contract: both times must be
+	// supplied to change them, otherwise keep the current window. Using
+	// just one side would leave the other at its zero value and produce an
+	// invalid item (e.g. EndTime at the epoch), so a half-supplied pair is
+	// treated as "no timing change".
+	if !draft.StartTime.IsZero() && !draft.EndTime.IsZero() {
+		merged.StartTime = draft.StartTime
+		merged.EndTime = draft.EndTime
+	}
+	if draft.AllDayEvent {
+		merged.AllDayEvent = true
+	}
+	if draft.BusyStatus != 0 {
+		merged.BusyStatus = draft.BusyStatus
+	}
+	if draft.Sensitivity != 0 {
+		merged.Sensitivity = draft.Sensitivity
+	}
+	if draft.Reminder > 0 {
+		merged.Reminder = draft.Reminder
+	}
+	if len(draft.Attendees) > 0 {
+		merged.Attendees = draft.Attendees
+	}
+	if draft.Recurrence != nil {
+		merged.Recurrence = draft.Recurrence
+	}
+	if len(draft.Exceptions) > 0 {
+		merged.Exceptions = draft.Exceptions
+	}
+	if draft.TimeZoneRaw != "" {
+		merged.TimeZoneRaw = draft.TimeZoneRaw
+	} else if draft.TimeZone != nil {
+		merged.TimeZone = draft.TimeZone
+		merged.TimeZoneRaw = ""
+	}
+	if draft.UID != "" {
+		merged.UID = draft.UID
+	}
+	return merged
 }
 
 // DeleteEvent removes an event identified by serverID.
@@ -593,8 +691,13 @@ func buildEventApp(draft EventDraft) *wbxml.Element {
 	if !draft.StartTime.IsZero() {
 		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "StartTime", wbxml.Text(formatEASTime(draft.StartTime))))
 	}
-	// UID (0x28) — EAS requires a GUID-shaped UID for new events.
-	uid := newEventUID()
+	// UID (0x28) — EAS requires a GUID-shaped UID for new events. On
+	// update the caller carries the server's existing UID so the item
+	// keeps its identity; only a fresh create generates a new one.
+	uid := draft.UID
+	if uid == "" {
+		uid = newEventUID()
+	}
 	app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "UID", wbxml.Text(uid)))
 	// ResponseRequested (0x34) — sent by every major EAS client on Add.
 	// ClientUid (0x3C) is deliberately not sent: it was introduced after
