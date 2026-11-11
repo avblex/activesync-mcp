@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -481,28 +482,12 @@ func TestCalendarUpdate_clearUnknownField(t *testing.T) {
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerCalendarTools(s, m.cfg, m)
 
-	ct, st := mcp.NewInMemoryTransports()
-	if _, err := s.Connect(t.Context(), st, nil); err != nil {
-		t.Fatal(err)
-	}
-	c := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	cs, err := c.Connect(t.Context(), ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cs.Close()
-	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
-		Name: "calendar_update_event",
-		Arguments: CalendarUpdateEventInput{
-			Account: "alpha", FolderID: "cal-id", ID: "cal-id:42",
-			Clear: []string{"bogus"},
-		},
+	res := callToolErr(t, s, "calendar_update_event", CalendarUpdateEventInput{
+		Account: "alpha", FolderID: "cal-id", ID: "cal-id:42",
+		Clear: []string{"bogus"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.IsError {
-		t.Error("want IsError for an unknown clear field")
+	if !strings.Contains(errText(t, res), "unknown clear field") {
+		t.Errorf("err text = %q", errText(t, res))
 	}
 }
 
@@ -514,28 +499,12 @@ func TestCalendarUpdate_clearConflictsWithValue(t *testing.T) {
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerCalendarTools(s, m.cfg, m)
 
-	ct, st := mcp.NewInMemoryTransports()
-	if _, err := s.Connect(t.Context(), st, nil); err != nil {
-		t.Fatal(err)
-	}
-	c := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	cs, err := c.Connect(t.Context(), ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cs.Close()
-	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
-		Name: "calendar_update_event",
-		Arguments: CalendarUpdateEventInput{
-			Account: "alpha", FolderID: "cal-id", ID: "cal-id:42",
-			Location: "https://example.com", Clear: []string{"location"},
-		},
+	res := callToolErr(t, s, "calendar_update_event", CalendarUpdateEventInput{
+		Account: "alpha", FolderID: "cal-id", ID: "cal-id:42",
+		Location: "https://example.com", Clear: []string{"location"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.IsError {
-		t.Error("want IsError when setting and clearing the same field")
+	if !strings.Contains(errText(t, res), "cannot set and clear location") {
+		t.Errorf("err text = %q", errText(t, res))
 	}
 }
 
@@ -559,7 +528,7 @@ func TestCalendarUpdate_clearPropagatesToDraft(t *testing.T) {
 		Account: "alpha", FolderID: "cal-id", ID: "cal-id:42",
 		Clear: []string{"location", "attendees"},
 	})
-	if len(gotDraft.ClearFields) != 2 {
-		t.Fatalf("ClearFields = %+v, want 2 entries", gotDraft.ClearFields)
+	if !slices.Equal(gotDraft.ClearFields, []string{"location", "attendees"}) {
+		t.Fatalf("ClearFields = %+v, want [location attendees]", gotDraft.ClearFields)
 	}
 }
