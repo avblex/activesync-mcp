@@ -180,6 +180,48 @@ func TestExpandRecurrences_monthlyByDayLast(t *testing.T) {
 		if dates[i] != want[i] {
 			t.Errorf("date %d = %s, want %s", i, dates[i], want[i])
 		}
+		// The anchor's 15:00 clock time must survive on every occurrence.
+		if !got[i].StartTime.Equal(mustDate(t, want[i]).Add(15 * time.Hour)) {
+			t.Errorf("occurrence %d time-of-day drifted: %v", i, got[i].StartTime)
+		}
+		if !got[i].EndTime.Equal(mustDate(t, want[i]).Add(16 * time.Hour)) {
+			t.Errorf("occurrence %d end drifted: %v", i, got[i].EndTime)
+		}
+	}
+}
+
+func TestExpandRecurrences_yearlyByDayLast(t *testing.T) {
+	// Last Friday of June every year, anchored Fri 2026-06-26 14:00Z.
+	ev := EventItem{
+		ServerID:  "f:6",
+		StartTime: mustDate(t, "2026-06-26").Add(14 * time.Hour),
+		EndTime:   mustDate(t, "2026-06-26").Add(15 * time.Hour),
+		Recurrence: &Recurrence{
+			Type:        RecurrenceYearlyByDay,
+			Interval:    1,
+			MonthOfYear: 6,
+			DayOfWeek:   DowFriday,
+			WeekOfMonth: 5,
+		},
+	}
+	got := ExpandRecurrences(ev, mustDate(t, "2026-01-01"), mustDate(t, "2029-01-01"))
+	// 2026: Jun 26; 2027: Jun 25; 2028: Jun 30.
+	want := []string{"2026-06-26", "2027-06-25", "2028-06-30"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d occurrences, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if d := got[i].StartTime.Format("2006-01-02"); d != w {
+			t.Errorf("date %d = %s, want %s", i, d, w)
+		}
+		// Full-timestamp comparison: the anchor's 14:00/15:00 window must
+		// survive on every occurrence, not just the anchor itself.
+		if !got[i].StartTime.Equal(mustDate(t, w).Add(14 * time.Hour)) {
+			t.Errorf("occurrence %d time-of-day drifted: %v", i, got[i].StartTime)
+		}
+		if !got[i].EndTime.Equal(mustDate(t, w).Add(15 * time.Hour)) {
+			t.Errorf("occurrence %d end drifted: %v", i, got[i].EndTime)
+		}
 	}
 }
 

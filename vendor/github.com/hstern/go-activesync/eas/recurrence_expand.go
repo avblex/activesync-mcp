@@ -264,12 +264,16 @@ func nthDayOfMonthAfter(cur time.Time, weekOfMonth int, dow DayOfWeek, interval 
 	if interval <= 0 {
 		interval = 1
 	}
+	tod := cur.Sub(time.Date(cur.Year(), cur.Month(), cur.Day(), 0, 0, 0, 0, time.UTC))
 	y, mon, _ := cur.Date()
 	m := int(mon) + interval
 	for y2, m2 := yearMonth(y, m); ; y2, m2 = yearMonth(y2, m2+1) {
+		// nthDayOfMonth returns midnight UTC; the strictly-after comparison
+		// is date-based, and the anchor's clock time is re-applied to the
+		// winner so every occurrence shares the anchor's time-of-day.
 		if d, ok := nthDayOfMonth(y2, time.Month(m2), weekOfMonth, dow); ok {
 			if d.After(cur) {
-				return d, true
+				return d.Add(tod), true
 			}
 		}
 	}
@@ -284,11 +288,14 @@ func nthDayInMonthAfterYear(cur time.Time, monthOfYear, weekOfMonth int, dow Day
 	if interval <= 0 {
 		interval = 1
 	}
+	tod := cur.Sub(time.Date(cur.Year(), cur.Month(), cur.Day(), 0, 0, 0, 0, time.UTC))
 	y, _, _ := cur.Date()
 	for y += interval; ; y += interval {
+		// Midnight-UTC comparison, anchor clock time re-applied (see
+		// nthDayOfMonthAfter).
 		if d, ok := nthDayOfMonth(y, time.Month(monthOfYear), weekOfMonth, dow); ok {
 			if d.After(cur) {
-				return d, true
+				return d.Add(tod), true
 			}
 		}
 	}
