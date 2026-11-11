@@ -7,9 +7,12 @@ import (
 	"time"
 )
 
-// maxOccurrenceIterations guards against malformed rules whose step never
-// advances (zero interval, contradictory fields). Normal series stop at the
-// window edge or their Until/Occurrences long before this.
+// maxOccurrenceIterations caps the walk from the anchor, guarding against
+// malformed rules whose step never advances. Normal series stop at the
+// window edge or their Until/Occurrences long before this. The cap bounds the
+// walk, not the output: a series anchored far enough in the past that
+// reaching windowStart would take more steps than the ceiling (e.g. a daily
+// series older than ~27 years) may under-report its occurrences.
 const maxOccurrenceIterations = 10000
 
 // weekEpoch is a known-Sunday midnight used to bucket calendar dates into
@@ -21,6 +24,13 @@ var weekEpoch = time.Date(1970, 1, 4, 0, 0, 0, 0, time.UTC)
 func weekIndex(d time.Time) int {
 	dd := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
 	return int(dd.Sub(weekEpoch).Hours() / 168)
+}
+
+// timeOfDay returns t's offset from midnight UTC of its own date — the
+// anchor's clock time, which every occurrence of a series must carry. Callers
+// normalize to UTC first, so this equals the wall-clock time.
+func timeOfDay(t time.Time) time.Duration {
+	return t.Sub(time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC))
 }
 
 // ExpandRecurrences returns one EventItem per occurrence of ev's series that
@@ -42,10 +52,18 @@ func ExpandRecurrences(ev EventItem, windowStart, windowEnd time.Time) []EventIt
 		return nil
 	}
 
+	// Normalize to UTC up front: parseEASTime accepts offset-bearing
+	// RFC3339, and both the exception map keys and the time-of-day math
+	// below assume UTC wall clock equals absolute time.
+	ev.StartTime = ev.StartTime.UTC()
+	ev.EndTime = ev.EndTime.UTC()
+	windowStart = windowStart.UTC()
+	windowEnd = windowEnd.UTC()
+
 	exc := map[time.Time]Exception{}
 	for _, x := range ev.Exceptions {
 		if !x.ExceptionStartTime.IsZero() {
-			exc[x.ExceptionStartTime] = x
+			exc[x.ExceptionStartTime.UTC()] = x
 		}
 	}
 
@@ -95,15 +113,15 @@ func ruleSatisfiable(r *Recurrence) bool {
 	case RecurrenceDaily:
 		return true
 	case RecurrenceWeekly:
-		return r.DayOfWeek != 0
+		return r.DayOfWeek&0x7F != 0
 	case RecurrenceMonthlyDate:
 		return r.DayOfMonth >= 1
 	case RecurrenceMonthlyByDay:
-		return r.DayOfWeek != 0 && r.WeekOfMonth >= 1
+		return r.DayOfWeek&0x7F != 0 && r.WeekOfMonth >= 1 && r.WeekOfMonth <= 5
 	case RecurrenceYearlyDate:
 		return r.MonthOfYear >= 1 && r.MonthOfYear <= 12 && r.DayOfMonth >= 1
 	case RecurrenceYearlyByDay:
-		return r.MonthOfYear >= 1 && r.MonthOfYear <= 12 && r.DayOfWeek != 0 && r.WeekOfMonth >= 1
+		return r.MonthOfYear >= 1 && r.MonthOfYear <= 12 && r.DayOfWeek&0x7F != 0 && r.WeekOfMonth >= 1 && r.WeekOfMonth <= 5
 	default:
 		return false
 	}
@@ -176,11 +194,11 @@ func (r *Recurrence) stepDays() int {
 // jump would skip same-week days.
 func nextWeeklyDay(cur, anchor time.Time, r *Recurrence) (time.Time, bool) {
 	mask := r.DayOfWeek
-	if mask == 0 {
+	if mask&0x7F == 0 {
 		return time.Time{}, false
 	}
 	interval := r.stepDays()
-	tod := cur.Sub(time.Date(cur.Year(), cur.Month(), cur.Day(), 0, 0, 0, 0, time.UTC))
+	tod := timeOfDay(cur)
 	curWeek := weekIndex(cur)
 	anchorWeek := weekIndex(anchor)
 	// Start from the current week (same-week masked days after cur still
@@ -191,7 +209,9 @@ func nextWeeklyDay(cur, anchor time.Time, r *Recurrence) (time.Time, bool) {
 	if delta%interval != 0 {
 		w += interval - delta%interval
 	}
-	for ; ; w += interval {
+	// Bounded even though a valid mask matches within one grid week: a
+	// mask of only out-of-range bits must not spin here forever.
+	for i := 0; i < 2*interval+2; i, w = i+1, w+interval {
 		sunday := weekEpoch.AddDate(0, 0, 7*w) // Sunday opening week w
 		for i := 0; i < 7; i++ {
 			d := sunday.AddDate(0, 0, i).Add(tod)
@@ -203,6 +223,7 @@ func nextWeeklyDay(cur, anchor time.Time, r *Recurrence) (time.Time, bool) {
 			}
 		}
 	}
+	return time.Time{}, false
 }
 
 // dowMatches reports whether d's weekday is in the mask.
@@ -240,7 +261,7 @@ func nextMonthlyDate(cur time.Time, r *Recurrence) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	interval := r.stepDays()
-	tod := cur.Sub(time.Date(cur.Year(), cur.Month(), cur.Day(), 0, 0, 0, 0, time.UTC))
+	tod := timeOfDay(cur)
 	y, mon, _ := cur.Date()
 	m := int(mon)
 	for i := 0; i < 24*interval+12; i++ {
@@ -258,16 +279,20 @@ func nextMonthlyDate(cur time.Time, r *Recurrence) (time.Time, bool) {
 // Interval months after cur's month (WeekOfMonth 5 = last). cur itself is
 // never returned.
 func nthDayOfMonthAfter(cur time.Time, weekOfMonth int, dow DayOfWeek, interval int) (time.Time, bool) {
-	if dow == 0 || (weekOfMonth < 1 && weekOfMonth != 5) {
+	if dow&0x7F == 0 || weekOfMonth < 1 || weekOfMonth > 5 {
 		return time.Time{}, false
 	}
 	if interval <= 0 {
 		interval = 1
 	}
-	tod := cur.Sub(time.Date(cur.Year(), cur.Month(), cur.Day(), 0, 0, 0, 0, time.UTC))
+	tod := timeOfDay(cur)
 	y, mon, _ := cur.Date()
 	m := int(mon) + interval
-	for y2, m2 := yearMonth(y, m); ; y2, m2 = yearMonth(y2, m2+1) {
+	// Every month holds at least four of each weekday, so a valid rule
+	// resolves within a couple of steps; the ceiling keeps a degenerate
+	// one from spinning.
+	y2, m2 := yearMonth(y, m)
+	for i := 0; i < 2*interval+12; i++ {
 		// nthDayOfMonth returns midnight UTC; the strictly-after comparison
 		// is date-based, and the anchor's clock time is re-applied to the
 		// winner so every occurrence shares the anchor's time-of-day.
@@ -276,21 +301,26 @@ func nthDayOfMonthAfter(cur time.Time, weekOfMonth int, dow DayOfWeek, interval 
 				return d.Add(tod), true
 			}
 		}
+		y2, m2 = yearMonth(y2, m2+1)
 	}
+	return time.Time{}, false
 }
 
 // nthDayInMonthAfterYear is the yearly analogue: WeekOfMonth-th DayOfWeek of
 // MonthOfYear, Interval years after cur's year.
 func nthDayInMonthAfterYear(cur time.Time, monthOfYear, weekOfMonth int, dow DayOfWeek, interval int) (time.Time, bool) {
-	if monthOfYear < 1 || monthOfYear > 12 || dow == 0 || (weekOfMonth < 1 && weekOfMonth != 5) {
+	if monthOfYear < 1 || monthOfYear > 12 || dow&0x7F == 0 || weekOfMonth < 1 || weekOfMonth > 5 {
 		return time.Time{}, false
 	}
 	if interval <= 0 {
 		interval = 1
 	}
-	tod := cur.Sub(time.Date(cur.Year(), cur.Month(), cur.Day(), 0, 0, 0, 0, time.UTC))
+	tod := timeOfDay(cur)
 	y, _, _ := cur.Date()
-	for y += interval; ; y += interval {
+	// A valid rule resolves within a few years; the ceiling keeps a
+	// degenerate one from spinning (see nthDayOfMonthAfter).
+	for i := 0; i < 4*interval+8; i++ {
+		y += interval
 		// Midnight-UTC comparison, anchor clock time re-applied (see
 		// nthDayOfMonthAfter).
 		if d, ok := nthDayOfMonth(y, time.Month(monthOfYear), weekOfMonth, dow); ok {
@@ -299,6 +329,7 @@ func nthDayInMonthAfterYear(cur time.Time, monthOfYear, weekOfMonth int, dow Day
 			}
 		}
 	}
+	return time.Time{}, false
 }
 
 // nthDayOfMonth finds the n-th (or last, n==5) day of the week `dow` in the
@@ -332,7 +363,7 @@ func nextYearlyDate(cur time.Time, r *Recurrence) (time.Time, bool) {
 	if r.MonthOfYear < 1 || r.MonthOfYear > 12 || r.DayOfMonth < 1 {
 		return time.Time{}, false
 	}
-	tod := cur.Sub(time.Date(cur.Year(), cur.Month(), cur.Day(), 0, 0, 0, 0, time.UTC))
+	tod := timeOfDay(cur)
 	y, _, _ := cur.Date()
 	interval := r.stepDays()
 	for i := 0; i < 8*interval+8; i++ {

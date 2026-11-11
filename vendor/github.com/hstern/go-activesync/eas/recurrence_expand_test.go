@@ -292,6 +292,80 @@ func TestExpandRecurrences_anchorOutsideWindowNotShown(t *testing.T) {
 	}
 }
 
+func TestExpandRecurrences_anchorAfterWindowEmpty(t *testing.T) {
+	// Anchor Fri 2026-12-04 lies strictly after windowEnd → early break,
+	// zero results (the series simply has not started inside the window).
+	ev := EventItem{
+		ServerID:  "f:7",
+		StartTime: mustDate(t, "2026-12-04").Add(9 * time.Hour),
+		EndTime:   mustDate(t, "2026-12-04").Add(10 * time.Hour),
+		Recurrence: &Recurrence{
+			Type:     RecurrenceDaily,
+			Interval: 1,
+		},
+	}
+	got := ExpandRecurrences(ev, mustDate(t, "2026-11-01"), mustDate(t, "2026-11-08"))
+	if len(got) != 0 {
+		t.Fatalf("anchor after window must yield nothing, got %+v", got)
+	}
+}
+
+func TestExpandRecurrences_biweeklyGridPhase(t *testing.T) {
+	// Every-2-weeks Thursday series anchored (first instance) Thu
+	// 2025-10-09: grid weeks alternate, so in late 2026 the Thursdays
+	// Nov 5, Nov 19, Dec 3 occur while Nov 12 and Nov 26 are skipped.
+	ev := EventItem{
+		ServerID:  "f:8",
+		StartTime: mustDate(t, "2025-10-09").Add(7*time.Hour + 30*time.Minute),
+		EndTime:   mustDate(t, "2025-10-09").Add(9 * time.Hour),
+		Recurrence: &Recurrence{
+			Type:      RecurrenceWeekly,
+			Interval:  2,
+			DayOfWeek: DowThursday,
+		},
+	}
+	got := ExpandRecurrences(ev, mustDate(t, "2026-11-01"), mustDate(t, "2026-12-08"))
+	var dates []string
+	for _, g := range got {
+		dates = append(dates, g.StartTime.Format("2006-01-02"))
+	}
+	want := []string{"2026-11-05", "2026-11-19", "2026-12-03"}
+	if len(dates) != len(want) {
+		t.Fatalf("got %v, want %v", dates, want)
+	}
+	for i := range want {
+		if dates[i] != want[i] {
+			t.Errorf("date %d = %s, want %s", i, dates[i], want[i])
+		}
+	}
+}
+
+func TestExpandRecurrences_deletedConsumesOccurrencesBudget(t *testing.T) {
+	// Budget of 3 daily instances: Nov 1, 2, 3. The Nov 2 instance is
+	// deleted, but it still consumed its slot, so exactly two rows
+	// remain and no Nov 4 appears.
+	ev := EventItem{
+		ServerID:  "f:9",
+		StartTime: mustDate(t, "2026-11-01").Add(9 * time.Hour),
+		EndTime:   mustDate(t, "2026-11-01").Add(10 * time.Hour),
+		Recurrence: &Recurrence{
+			Type:        RecurrenceDaily,
+			Interval:    1,
+			Occurrences: 3,
+		},
+		Exceptions: []Exception{
+			{ExceptionStartTime: mustDate(t, "2026-11-02").Add(9 * time.Hour), Deleted: true},
+		},
+	}
+	got := ExpandRecurrences(ev, mustDate(t, "2026-11-01"), mustDate(t, "2026-11-30"))
+	if len(got) != 2 {
+		t.Fatalf("want 2 occurrences (deleted one consumed its slot), got %d", len(got))
+	}
+	if got[1].StartTime.Format("2006-01-02") != "2026-11-03" {
+		t.Errorf("last occurrence = %s, want 2026-11-03", got[1].StartTime.Format("2006-01-02"))
+	}
+}
+
 func TestExpandRecurrences_malformedRuleYieldsNothing(t *testing.T) {
 	cases := []EventItem{
 		{ServerID: "a", StartTime: mustDate(t, "2026-11-01"), Recurrence: &Recurrence{Type: RecurrenceDaily}}, // zero interval
