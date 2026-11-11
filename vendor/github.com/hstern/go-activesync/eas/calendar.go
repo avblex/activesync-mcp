@@ -95,9 +95,11 @@ type EventDraft struct {
 	// "location", "attendees", "reminder", "sensitivity", "busy_status".
 	// A zero value means "leave unchanged" in the read-modify-write merge, so
 	// a caller cannot express "clear this field" by simply omitting it.
-	// buildEventApp emits an explicit empty element for each listed field;
-	// for the clear to reach the server the update merge must also zero the
-	// corresponding draft value so the Change carries the cleared state.
+	// For location/attendees/reminder buildEventApp emits an explicit
+	// empty-or-zero element; busy_status/sensitivity are always serialized
+	// and are simply sent zeroed. For the clear to reach the server the
+	// update merge must also zero the corresponding draft value so the
+	// Change carries the cleared state.
 	ClearFields []string
 }
 
@@ -404,7 +406,8 @@ func (c *httpClient) CreateEvent(ctx context.Context, folderID string, draft Eve
 
 // UpdateEvent modifies an existing event identified by serverID. It is a
 // read-modify-write: the event's current state is fetched first and only
-// the non-zero fields of draft are applied on top. This matters because
+// the non-zero fields of draft are applied on top (fields listed in
+// draft.ClearFields are additionally zeroed). This matters because
 // Exchange replaces the whole item on a calendar Change — sending just the
 // changed fields would silently drop everything else (subject, attendees,
 // recurrence, time zone, ...).

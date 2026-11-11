@@ -120,4 +120,13 @@ func TestMergeEventDraftClear(t *testing.T) {
 	if len(m.ClearFields) != 5 {
 		t.Errorf("ClearFields not carried: %+v", m.ClearFields)
 	}
+
+	// A clear must win even when the same field is also supplied as a value.
+	m = mergeEventDraft(current, EventDraft{
+		Location:    "Room 1",
+		ClearFields: []string{"location"},
+	})
+	if m.Location != "" {
+		t.Errorf("clear did not win over a same-field draft value: %q", m.Location)
+	}
 }
