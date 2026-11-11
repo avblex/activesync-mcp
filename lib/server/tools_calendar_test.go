@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -589,5 +590,129 @@ func TestCalendarCreate_keepsLocalTimeZone(t *testing.T) {
 	})
 	if gotDraft.TimeZoneRaw == "" {
 		t.Error("create draft TimeZoneRaw is empty, want the host's local zone")
+	}
+}
+
+// TestCalendarListEvents_expandsRecurringSeries confirms a recurring item is
+// returned as one row per in-window occurrence with id suffixes and a
+// series_id, while single events pass through untouched.
+func TestCalendarListEvents_expandsRecurringSeries(t *testing.T) {
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			SyncCalendarFunc: func(_ context.Context, _ string, _ eas.CalendarSyncOptions) (*eas.CalendarSyncResult, error) {
+				anchor := time.Date(2025, 10, 9, 7, 30, 0, 0, time.UTC) // Thursday
+				return &eas.CalendarSyncResult{
+					SyncKey: "C2",
+					Added: []eas.EventItem{
+						{
+							ServerID:  "cal-id:42",
+							Subject:   "Еженедельный статус (производство)",
+							StartTime: anchor,
+							EndTime:   anchor.Add(90 * time.Minute),
+							Recurrence: &eas.Recurrence{
+								Type:      eas.RecurrenceWeekly,
+								Interval:  1,
+								DayOfWeek: eas.DowThursday,
+							},
+						},
+						{
+							ServerID:  "cal-id:7",
+							Subject:   "One-off",
+							StartTime: time.Date(2026, 11, 12, 16, 0, 0, 0, time.UTC),
+							EndTime:   time.Date(2026, 11, 12, 17, 0, 0, 0, time.UTC),
+						},
+					},
+				}, nil
+			},
+		},
+	}
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	out := callTool(t, s, "calendar_list_events", CalendarListEventsInput{
+		Account: "alpha", FolderID: "cal-id",
+	})
+	events := out["events"].([]any)
+	type row struct {
+		ID       string `json:"id"`
+		Subject  string `json:"subject"`
+		SeriesID string `json:"series_id"`
+	}
+	var rows []row
+	for _, e := range events {
+		var r row
+		b, _ := json.Marshal(e)
+		_ = json.Unmarshal(b, &r)
+		rows = append(rows, r)
+	}
+	var seriesRows, oneOff int
+	for _, r := range rows {
+		switch {
+		case r.SeriesID == "cal-id:42":
+			seriesRows++
+			if !strings.HasPrefix(r.ID, "cal-id:42@") {
+				t.Errorf("series row id %q lacks the cal-id:42@ prefix", r.ID)
+			}
+		case r.ID == "cal-id:7":
+			oneOff++
+			if r.SeriesID != "" {
+				t.Errorf("one-off row carries series_id %q", r.SeriesID)
+			}
+		}
+	}
+	// Default window is 2 weeks from today: a weekly series always yields
+	// exactly two in-window Thursdays regardless of the current date.
+	if seriesRows != 2 {
+		t.Errorf("expanded series rows = %d, want 2", seriesRows)
+	}
+	if oneOff != 1 {
+		t.Errorf("one-off rows = %d, want 1", oneOff)
+	}
+}
+
+// TestCalendarListEvents_recurringAnchorFallback pins the safety net: when a
+// series has no occurrence in the window (its Until is in the past), the
+// anchor row is still shown rather than vanishing.
+func TestCalendarListEvents_recurringAnchorFallback(t *testing.T) {
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			SyncCalendarFunc: func(_ context.Context, _ string, _ eas.CalendarSyncOptions) (*eas.CalendarSyncResult, error) {
+				anchor := time.Date(2025, 1, 2, 9, 0, 0, 0, time.UTC)
+				until := time.Date(2025, 6, 30, 10, 0, 0, 0, time.UTC)
+				return &eas.CalendarSyncResult{
+					SyncKey: "C2",
+					Added: []eas.EventItem{
+						{
+							ServerID:  "cal-id:9",
+							Subject:   "Закончившаяся серия",
+							StartTime: anchor,
+							EndTime:   anchor.Add(time.Hour),
+							Recurrence: &eas.Recurrence{
+								Type:      eas.RecurrenceWeekly,
+								Interval:  1,
+								DayOfWeek: eas.DowMonday,
+								Until:     until,
+							},
+						},
+					},
+				}, nil
+			},
+		},
+	}
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	out := callTool(t, s, "calendar_list_events", CalendarListEventsInput{
+		Account: "alpha", FolderID: "cal-id",
+	})
+	events := out["events"].([]any)
+	if len(events) != 1 {
+		t.Fatalf("want the anchor row, got %d rows", len(events))
+	}
+	row := events[0].(map[string]any)
+	if row["id"] != "cal-id:9" {
+		t.Errorf("anchor row id = %v, want cal-id:9", row["id"])
 	}
 }

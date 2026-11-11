@@ -107,6 +107,10 @@ type EventRow struct {
 	BusyStatus int       `json:"busy_status,omitempty"`
 	Organizer  string    `json:"organizer,omitempty"`
 	Attendees  []string  `json:"attendees,omitempty"`
+	// SeriesID is set for rows expanded from a recurring series and holds
+	// the bare server id of the series anchor. Update/delete operations
+	// take this id, not the occurrence id.
+	SeriesID string `json:"series_id,omitempty"`
 }
 
 // CalendarListEventsOutput wraps the rows.
@@ -149,7 +153,10 @@ func registerCalendarListEvents(s *mcp.Server, m *Manager, accounts []string) {
 	tool := &mcp.Tool{
 		Name: "calendar_list_events",
 		Description: "List calendar events from a folder. " +
-			"Use date_window to limit recency.",
+			"Use date_window to limit recency. Recurring series are expanded " +
+			"into one row per occurrence within the window; such rows carry a " +
+			"series_id (the bare id to use for update/delete) and an id " +
+			"suffixed with the occurrence date.",
 	}
 	scopeEnum(tool, "account", accounts)
 	mcp.AddTool(s, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in CalendarListEventsInput) (*mcp.CallToolResult, CalendarListEventsOutput, error) {
@@ -175,14 +182,64 @@ func registerCalendarListEvents(s *mcp.Server, m *Manager, accounts []string) {
 		if broadened {
 			out.DateWindowApplied = applied
 		}
+		winStart, winEnd := expansionWindow(filter, time.Now())
 		for _, ev := range res.Added {
-			out.Events = append(out.Events, eventRowFrom(ev))
+			out.Events = append(out.Events, eventRowsFrom(ev, winStart, winEnd)...)
 		}
 		for _, ev := range res.Changed {
-			out.Events = append(out.Events, eventRowFrom(ev))
+			out.Events = append(out.Events, eventRowsFrom(ev, winStart, winEnd)...)
 		}
 		return jsonResult(out)
 	})
+}
+
+// expansionWindow derives the client-side expansion window from the
+// requested date window. The right edge mirrors what the server was asked
+// about; "none" (FilterNone) has no server-side bound, so infinite series
+// get a fixed one-year horizon.
+func expansionWindow(filter eas.FilterType, now time.Time) (time.Time, time.Time) {
+	start := now.Truncate(24 * time.Hour)
+	var end time.Time
+	switch filter {
+	case eas.FilterOneDay:
+		end = start.Add(24 * time.Hour)
+	case eas.FilterThreeDay:
+		end = start.Add(3 * 24 * time.Hour)
+	case eas.FilterOneWeek:
+		end = start.Add(7 * 24 * time.Hour)
+	case eas.FilterTwoWeek:
+		end = start.Add(14 * 24 * time.Hour)
+	case eas.FilterOneMonth:
+		end = start.AddDate(0, 1, 0)
+	case eas.FilterThreeMonth:
+		end = start.AddDate(0, 3, 0)
+	case eas.FilterSixMonth:
+		end = start.AddDate(0, 6, 0)
+	default: // FilterNone
+		end = start.AddDate(1, 0, 0)
+	}
+	return start, end
+}
+
+// eventRowsFrom expands a recurring item into one row per in-window
+// occurrence (id suffixed with the occurrence date, series_id carrying the
+// anchor id) and falls back to the plain anchor row when nothing falls in
+// the window, so a series never vanishes from the list silently.
+func eventRowsFrom(ev eas.EventItem, winStart, winEnd time.Time) []EventRow {
+	if ev.Recurrence == nil {
+		return []EventRow{eventRowFrom(ev)}
+	}
+	var rows []EventRow
+	for _, occ := range eas.ExpandRecurrences(ev, winStart, winEnd) {
+		row := eventRowFrom(occ)
+		row.SeriesID = ev.ServerID
+		row.ID = ev.ServerID + "@" + occ.StartTime.UTC().Format("2006-01-02")
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		rows = append(rows, eventRowFrom(ev))
+	}
+	return rows
 }
 
 func eventRowFrom(ev eas.EventItem) EventRow {
