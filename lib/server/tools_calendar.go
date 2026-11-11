@@ -339,6 +339,13 @@ func registerCalendarUpdate(s *mcp.Server, m *Manager, accounts []string) {
 			AllDay: in.AllDay, BusyStatus: in.BusyStatus,
 			Attendees: in.Attendees, ReminderMin: in.ReminderMin,
 		})
+		// draftFromInput attaches the host's local zone because Exchange
+		// requires one on calendar Add; on an update it would instead
+		// overwrite the item's existing zone with the host's. Leave it
+		// empty so UpdateEvent's read-modify-write round-trips the raw
+		// time-zone blob the server reported (or omits the element, and
+		// the server keeps its default).
+		draft.TimeZoneRaw = ""
 		draft.ClearFields = in.Clear
 		if err := c.UpdateEvent(ctx, in.FolderID, in.ID, draft); err != nil {
 			return nil, CalendarCreateEventOutput{}, fmt.Errorf("UpdateEvent: %w", err)

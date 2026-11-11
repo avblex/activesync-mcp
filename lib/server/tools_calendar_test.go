@@ -532,3 +532,62 @@ func TestCalendarUpdate_clearPropagatesToDraft(t *testing.T) {
 		t.Fatalf("ClearFields = %+v, want [location attendees]", gotDraft.ClearFields)
 	}
 }
+
+// TestCalendarUpdate_doesNotOverrideTimeZone pins the read-modify-write
+// contract for the time zone: the update path must leave TimeZoneRaw empty so
+// UpdateEvent round-trips the raw blob the server reported, instead of
+// overwriting the item's zone with the host's local zone (which draftFromInput
+// attaches because Exchange requires one on calendar Add).
+func TestCalendarUpdate_doesNotOverrideTimeZone(t *testing.T) {
+	var gotDraft eas.EventDraft
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			UpdateEventFunc: func(_ context.Context, _, _ string, d eas.EventDraft) error {
+				gotDraft = d
+				return nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{access: config.AccessRW})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	callTool(t, s, "calendar_update_event", CalendarUpdateEventInput{
+		Account: "alpha", FolderID: "cal-id", ID: "cal-id:42",
+		Location: "https://example.com",
+	})
+	if gotDraft.TimeZoneRaw != "" {
+		t.Errorf("update draft TimeZoneRaw = %q, want empty (server blob must win)", gotDraft.TimeZoneRaw)
+	}
+	if gotDraft.TimeZone != nil {
+		t.Errorf("update draft TimeZone = %+v, want nil", gotDraft.TimeZone)
+	}
+}
+
+// TestCalendarCreate_keepsLocalTimeZone guards the companion half of the same
+// decision: creates keep attaching the host's local zone, which Exchange
+// requires on calendar Add (the all-zero UTC blob is rejected with item
+// status 6).
+func TestCalendarCreate_keepsLocalTimeZone(t *testing.T) {
+	var gotDraft eas.EventDraft
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			CreateEventFunc: func(_ context.Context, _ string, d eas.EventDraft) (string, error) {
+				gotDraft = d
+				return "cal-id:99", nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{access: config.AccessRW})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	start := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	callTool(t, s, "calendar_create_event", CalendarCreateEventInput{
+		Account: "alpha", FolderID: "cal-id",
+		Subject: "Plan", StartTime: start, EndTime: start.Add(time.Hour),
+	})
+	if gotDraft.TimeZoneRaw == "" {
+		t.Error("create draft TimeZoneRaw is empty, want the host's local zone")
+	}
+}
