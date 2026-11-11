@@ -79,6 +79,13 @@ type EventDraft struct {
 	Sensitivity int // 0=normal, 1=personal, 2=private, 3=confidential
 	Reminder    int // minutes before; 0 = none
 	Attendees   []EventAttendee
+	// OrganizerEmail/Name identify the meeting organizer. Exchange
+	// requires OrganizerEmail on Add whenever the item has attendees
+	// (MeetingStatus 1); omitting it fails with item status 6
+	// (ConversionError). The organizer is the mailbox owner, so callers
+	// typically pass the account's own address.
+	OrganizerEmail string
+	OrganizerName  string
 	// Recurrence sets a repeat rule; nil means single-instance.
 	Recurrence *Recurrence
 	// Exceptions list per-instance overrides for a recurring event.
@@ -460,8 +467,13 @@ func mergeEventDraft(current EventItem, draft EventDraft) EventDraft {
 		Sensitivity: current.Sensitivity,
 		Reminder:    current.Reminder,
 		Attendees:   current.Attendees,
-		Recurrence:  current.Recurrence,
-		Exceptions:  current.Exceptions,
+		// Round-trip the organizer the server reported: a Change replaces
+		// the whole item, and dropping the organizer from a meeting can
+		// fail conversion the same way a missing one fails Add.
+		OrganizerEmail: current.OrganizerEmail,
+		OrganizerName:  current.OrganizerName,
+		Recurrence:     current.Recurrence,
+		Exceptions:     current.Exceptions,
 		// Round-trip the raw time-zone blob the server reported (byte
 		// identical). Do NOT fall back to the parsed current.TimeZone:
 		// when the server omitted it that struct is zero-valued, and the
@@ -501,6 +513,12 @@ func mergeEventDraft(current EventItem, draft EventDraft) EventDraft {
 	}
 	if len(draft.Attendees) > 0 {
 		merged.Attendees = draft.Attendees
+	}
+	if draft.OrganizerEmail != "" {
+		merged.OrganizerEmail = draft.OrganizerEmail
+	}
+	if draft.OrganizerName != "" {
+		merged.OrganizerName = draft.OrganizerName
 	}
 	if draft.Recurrence != nil {
 		merged.Recurrence = draft.Recurrence
@@ -649,7 +667,8 @@ func (d EventDraft) clears(name string) bool {
 // unordered calendar items with item status 6 (ConversionError). Calendar
 // page order: TimeZone 0x05, AllDayEvent 0x06, Attendees 0x07, BusyStatus
 // 0x0D, EndTime 0x12, Exceptions 0x14, Location 0x17, MeetingStatus 0x18,
-// Recurrence 0x1B, Reminder 0x24, Sensitivity 0x25, Subject 0x26,
+// OrganizerEmail 0x19, OrganizerName 0x1A, Recurrence 0x1B, Reminder 0x24,
+// Sensitivity 0x25, Subject 0x26,
 // StartTime 0x27, UID 0x28. The AirSyncBase Body element follows last
 // (separate codepage, sent after the calendar page content).
 func buildEventApp(draft EventDraft) *wbxml.Element {
@@ -680,6 +699,15 @@ func buildEventApp(draft EventDraft) *wbxml.Element {
 			}
 			if a.Name != "" {
 				at.Children = append(at.Children, wbxml.E(wbxml.PageCalendar, "Name", wbxml.Text(a.Name)))
+			}
+			// AttendeeStatus (0x29) / AttendeeType (0x2A): emitted when
+			// known so an update round-trips the values the server
+			// reported instead of dropping them.
+			if a.AttendeeStatus != 0 {
+				at.Children = append(at.Children, wbxml.E(wbxml.PageCalendar, "AttendeeStatus", wbxml.Text(itoa(a.AttendeeStatus))))
+			}
+			if a.AttendeeType != 0 {
+				at.Children = append(at.Children, wbxml.E(wbxml.PageCalendar, "AttendeeType", wbxml.Text(itoa(a.AttendeeType))))
 			}
 			atts.Children = append(atts.Children, at)
 		}
@@ -716,6 +744,18 @@ func buildEventApp(draft EventDraft) *wbxml.Element {
 	}
 	app.Children = append(app.Children,
 		wbxml.E(wbxml.PageCalendar, "MeetingStatus", wbxml.Text(itoa(meetingStatus))))
+	// OrganizerEmail (0x19) / OrganizerName (0x1A). MS-ASAIRS requires
+	// OrganizerEmail on an item with attendees; Exchange rejects a meeting
+	// Add without it with item status 6 (ConversionError). Only meaningful
+	// for meetings, so emit alongside MeetingStatus 1.
+	if meetingStatus == 1 && draft.OrganizerEmail != "" {
+		app.Children = append(app.Children,
+			wbxml.E(wbxml.PageCalendar, "OrganizerEmail", wbxml.Text(draft.OrganizerEmail)))
+		if draft.OrganizerName != "" {
+			app.Children = append(app.Children,
+				wbxml.E(wbxml.PageCalendar, "OrganizerName", wbxml.Text(draft.OrganizerName)))
+		}
+	}
 	// Recurrence (0x1B)
 	if rec := recurrenceToWBXML(draft.Recurrence); rec != nil {
 		app.Children = append(app.Children, rec)

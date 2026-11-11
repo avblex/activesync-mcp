@@ -821,3 +821,47 @@ func TestCalendarListEvents_noneWindowOneYearHorizon(t *testing.T) {
 		}
 	}
 }
+
+// TestCalendarCreate_setsOrganizerFromAccount pins the meeting-Add fix:
+// Exchange rejects an Add with attendees and no organizer (item status 6),
+// so the create draft must carry the account's own address as organizer
+// whenever attendees are present.
+func TestCalendarCreate_setsOrganizerFromAccount(t *testing.T) {
+	var gotDraft eas.EventDraft
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			CreateEventFunc: func(_ context.Context, _ string, d eas.EventDraft) (string, error) {
+				gotDraft = d
+				return "cal-id:99", nil
+			},
+		},
+	}
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	start := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	callTool(t, s, "calendar_create_event", CalendarCreateEventInput{
+		Account: "alpha", FolderID: "cal-id",
+		Subject: "Plan", StartTime: start, EndTime: start.Add(time.Hour),
+		Attendees: []CalendarAttendee{{Email: "guest@x.com"}},
+	})
+	// newMockManager configures the account with Username "u".
+	if gotDraft.OrganizerEmail != "u" {
+		t.Errorf("create draft OrganizerEmail = %q, want the account username %q", gotDraft.OrganizerEmail, "u")
+	}
+	// Exchange rejects an attendee without a display name on Add; the
+	// draft must carry the email-as-name fallback.
+	if len(gotDraft.Attendees) != 1 || gotDraft.Attendees[0].Name != "guest@x.com" {
+		t.Errorf("attendee name fallback = %+v, want Name %q", gotDraft.Attendees, "guest@x.com")
+	}
+
+	// An appointment without attendees needs no organizer.
+	callTool(t, s, "calendar_create_event", CalendarCreateEventInput{
+		Account: "alpha", FolderID: "cal-id",
+		Subject: "Solo", StartTime: start, EndTime: start.Add(time.Hour),
+	})
+	if gotDraft.OrganizerEmail != "" {
+		t.Errorf("appointment draft carries organizer %q, want none", gotDraft.OrganizerEmail)
+	}
+}

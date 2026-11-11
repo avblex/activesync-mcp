@@ -318,7 +318,13 @@ func registerCalendarCreate(s *mcp.Server, m *Manager, accounts []string) {
 		if err != nil {
 			return nil, CalendarCreateEventOutput{}, err
 		}
-		id, err := c.CreateEvent(ctx, in.FolderID, draftFromInput(in))
+		draft := draftFromInput(in)
+		// Exchange requires an organizer on an Add that carries attendees
+		// (item status 6 otherwise); the organizer is the mailbox owner.
+		if a := m.cfg.FindAccount(in.Account); a != nil && len(in.Attendees) > 0 {
+			draft.OrganizerEmail = a.Username
+		}
+		id, err := c.CreateEvent(ctx, in.FolderID, draft)
 		if err != nil {
 			return nil, CalendarCreateEventOutput{}, fmt.Errorf("CreateEvent: %w", err)
 		}
@@ -418,6 +424,13 @@ func registerCalendarUpdate(s *mcp.Server, m *Manager, accounts []string) {
 		// the server keeps its default).
 		draft.TimeZoneRaw = ""
 		draft.ClearFields = in.Clear
+		// Same organizer rule as create: Exchange tolerates its absence on
+		// Change, but sending it keeps the meeting's organizer explicit
+		// when attendees are (re)supplied. mergeEventDraft round-trips the
+		// server's stored organizer when the caller does not touch them.
+		if a := m.cfg.FindAccount(in.Account); a != nil && len(in.Attendees) > 0 {
+			draft.OrganizerEmail = a.Username
+		}
 		if err := c.UpdateEvent(ctx, in.FolderID, in.ID, draft); err != nil {
 			return nil, CalendarCreateEventOutput{}, fmt.Errorf("UpdateEvent: %w", err)
 		}
@@ -525,7 +538,15 @@ func draftFromInput(in CalendarCreateEventInput) eas.EventDraft {
 		TimeZoneRaw: eas.EncodeTimeZone(time.Local),
 	}
 	for _, a := range in.Attendees {
-		d.Attendees = append(d.Attendees, eas.EventAttendee{Name: a.Name, Email: a.Email})
+		// Exchange's meeting converter rejects an attendee without a
+		// display name on Add (item status 6, ConversionError). The name
+		// is optional in the input; fall back to the address itself,
+		// which is what mail clients display anyway.
+		name := a.Name
+		if name == "" {
+			name = a.Email
+		}
+		d.Attendees = append(d.Attendees, eas.EventAttendee{Name: name, Email: a.Email})
 	}
 	return d
 }
