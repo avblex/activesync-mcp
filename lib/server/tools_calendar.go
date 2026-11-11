@@ -271,6 +271,48 @@ type CalendarUpdateEventInput struct {
 	BusyStatus  int                `json:"busy_status,omitempty"`
 	Attendees   []CalendarAttendee `json:"attendees,omitempty"`
 	ReminderMin int                `json:"reminder_minutes,omitempty"`
+	Clear       []string           `json:"clear,omitempty" jsonschema:"field names to reset to default: location, attendees, reminder, sensitivity, busy_status"`
+}
+
+// clearableCalendarFields is the set of fields calendar_update_event may
+// reset to their default via the clear input.
+var clearableCalendarFields = map[string]bool{
+	"location":    true,
+	"attendees":   true,
+	"reminder":    true,
+	"sensitivity": true,
+	"busy_status": true,
+}
+
+// validateClearFields rejects unknown field names and conflicts between a
+// supplied value and a request to clear the same field in one update.
+func validateClearFields(in CalendarUpdateEventInput) error {
+	for _, name := range in.Clear {
+		if !clearableCalendarFields[name] {
+			return fmt.Errorf("unknown clear field %q (allowed: location, attendees, reminder, sensitivity, busy_status)", name)
+		}
+	}
+	for _, name := range in.Clear {
+		switch name {
+		case "location":
+			if in.Location != "" {
+				return errors.New("cannot set and clear location in the same update")
+			}
+		case "attendees":
+			if len(in.Attendees) > 0 {
+				return errors.New("cannot set and clear attendees in the same update")
+			}
+		case "reminder":
+			if in.ReminderMin > 0 {
+				return errors.New("cannot set and clear reminder in the same update")
+			}
+		case "busy_status":
+			if in.BusyStatus != 0 {
+				return errors.New("cannot set and clear busy_status in the same update")
+			}
+		}
+	}
+	return nil
 }
 
 func registerCalendarUpdate(s *mcp.Server, m *Manager, accounts []string) {
@@ -284,6 +326,9 @@ func registerCalendarUpdate(s *mcp.Server, m *Manager, accounts []string) {
 		if err := m.CheckClass(in.Account, config.ClassCalendar, true); err != nil {
 			return nil, CalendarCreateEventOutput{}, err
 		}
+		if err := validateClearFields(in); err != nil {
+			return nil, CalendarCreateEventOutput{}, err
+		}
 		c, err := m.Client(ctx, in.Account)
 		if err != nil {
 			return nil, CalendarCreateEventOutput{}, err
@@ -294,6 +339,7 @@ func registerCalendarUpdate(s *mcp.Server, m *Manager, accounts []string) {
 			AllDay: in.AllDay, BusyStatus: in.BusyStatus,
 			Attendees: in.Attendees, ReminderMin: in.ReminderMin,
 		})
+		draft.ClearFields = in.Clear
 		if err := c.UpdateEvent(ctx, in.FolderID, in.ID, draft); err != nil {
 			return nil, CalendarCreateEventOutput{}, fmt.Errorf("UpdateEvent: %w", err)
 		}

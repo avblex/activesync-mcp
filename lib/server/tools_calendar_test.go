@@ -472,3 +472,94 @@ func TestCalendarRespondInvite_wrapsError(t *testing.T) {
 		t.Errorf("err text = %q", errText(t, res))
 	}
 }
+
+// TestCalendarUpdate_clearUnknownField rejects a clear name that is not a
+// known clearable field.
+func TestCalendarUpdate_clearUnknownField(t *testing.T) {
+	mock := &easmock.Client{} // sentinel: any real call is a failure
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	ct, st := mcp.NewInMemoryTransports()
+	if _, err := s.Connect(t.Context(), st, nil); err != nil {
+		t.Fatal(err)
+	}
+	c := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	cs, err := c.Connect(t.Context(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: "calendar_update_event",
+		Arguments: CalendarUpdateEventInput{
+			Account: "alpha", FolderID: "cal-id", ID: "cal-id:42",
+			Clear: []string{"bogus"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("want IsError for an unknown clear field")
+	}
+}
+
+// TestCalendarUpdate_clearConflictsWithValue rejects supplying a field both
+// as a value and in clear.
+func TestCalendarUpdate_clearConflictsWithValue(t *testing.T) {
+	mock := &easmock.Client{}
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	ct, st := mcp.NewInMemoryTransports()
+	if _, err := s.Connect(t.Context(), st, nil); err != nil {
+		t.Fatal(err)
+	}
+	c := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	cs, err := c.Connect(t.Context(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: "calendar_update_event",
+		Arguments: CalendarUpdateEventInput{
+			Account: "alpha", FolderID: "cal-id", ID: "cal-id:42",
+			Location: "https://example.com", Clear: []string{"location"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("want IsError when setting and clearing the same field")
+	}
+}
+
+// TestCalendarUpdate_clearPropagatesToDraft confirms a valid clear reaches the
+// underlying draft.
+func TestCalendarUpdate_clearPropagatesToDraft(t *testing.T) {
+	var gotDraft eas.EventDraft
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			UpdateEventFunc: func(_ context.Context, _, _ string, d eas.EventDraft) error {
+				gotDraft = d
+				return nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{access: config.AccessRW})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+
+	callTool(t, s, "calendar_update_event", CalendarUpdateEventInput{
+		Account: "alpha", FolderID: "cal-id", ID: "cal-id:42",
+		Clear: []string{"location", "attendees"},
+	})
+	if len(gotDraft.ClearFields) != 2 {
+		t.Fatalf("ClearFields = %+v, want 2 entries", gotDraft.ClearFields)
+	}
+}
