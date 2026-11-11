@@ -90,6 +90,11 @@ type EventDraft struct {
 	// supply the base64 string the server gave you on a previous
 	// fetch (for byte-identical round-trip).
 	TimeZoneRaw string
+	// ClearFields lists field names to reset to their default on update:
+	// "location", "attendees", "reminder", "sensitivity", "busy_status".
+	// Because a zero value means "leave unchanged" in the read-modify-write
+	// merge, this is the only way to explicitly clear a field.
+	ClearFields []string
 }
 
 // CalendarSyncOptions controls a SyncCalendar request.
@@ -605,6 +610,19 @@ func (c *httpClient) sendSyncCommands(ctx context.Context, folderID string, cmds
 	return resp.Root, nil
 }
 
+// clears reports whether the draft asks to reset the named field to its
+// default. buildEventApp uses it to force an explicit empty element for the
+// conditionally-serialized fields (location, attendees, reminder), which
+// would otherwise be omitted and left unchanged on the server.
+func (d EventDraft) clears(name string) bool {
+	for _, n := range d.ClearFields {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
 // buildEventApp renders a draft as an ApplicationData element. MS-ASAIRS
 // §20 requires child elements in ascending tag-ID order; Exchange rejects
 // unordered calendar items with item status 6 (ConversionError). Calendar
@@ -630,7 +648,7 @@ func buildEventApp(draft EventDraft) *wbxml.Element {
 		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "AllDayEvent", wbxml.Text("0")))
 	}
 	// Attendees (0x07)
-	if len(draft.Attendees) > 0 {
+	if len(draft.Attendees) > 0 || draft.clears("attendees") {
 		atts := wbxml.E(wbxml.PageCalendar, "Attendees")
 		for _, a := range draft.Attendees {
 			at := wbxml.E(wbxml.PageCalendar, "Attendee")
@@ -662,8 +680,9 @@ func buildEventApp(draft EventDraft) *wbxml.Element {
 		}
 		app.Children = append(app.Children, exc)
 	}
-	// Location (0x17)
-	if draft.Location != "" {
+	// Location (0x17). A cleared location is sent as an empty element so the
+	// server drops the stored value; omitting it would keep the old one.
+	if draft.Location != "" || draft.clears("location") {
 		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "Location", wbxml.Text(draft.Location)))
 	}
 	// MeetingStatus (0x18) — required on Add. 0 = appointment,
@@ -678,8 +697,9 @@ func buildEventApp(draft EventDraft) *wbxml.Element {
 	if rec := recurrenceToWBXML(draft.Recurrence); rec != nil {
 		app.Children = append(app.Children, rec)
 	}
-	// Reminder (0x24), Sensitivity (0x25)
-	if draft.Reminder > 0 {
+	// Reminder (0x24), Sensitivity (0x25). A cleared reminder is sent as an
+	// explicit 0 so the server drops the stored reminder.
+	if draft.Reminder > 0 || draft.clears("reminder") {
 		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "Reminder", wbxml.Text(itoa(draft.Reminder))))
 	}
 	app.Children = append(app.Children,
