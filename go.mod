@@ -9,7 +9,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/exp/teatest v0.0.0-20260510215043-e3181689be6b
-	github.com/hstern/go-activesync v1.1.0
+	github.com/hstern/go-activesync v1.1.1
 	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
@@ -58,3 +58,5 @@ require (
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 )
+
+replace github.com/hstern/go-activesync => github.com/avblex/go-activesync v1.1.1
