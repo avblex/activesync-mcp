@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/hstern/go-activesync/wbxml"
@@ -92,8 +93,11 @@ type EventDraft struct {
 	TimeZoneRaw string
 	// ClearFields lists field names to reset to their default on update:
 	// "location", "attendees", "reminder", "sensitivity", "busy_status".
-	// Because a zero value means "leave unchanged" in the read-modify-write
-	// merge, this is the only way to explicitly clear a field.
+	// A zero value means "leave unchanged" in the read-modify-write merge, so
+	// a caller cannot express "clear this field" by simply omitting it.
+	// buildEventApp emits an explicit empty element for each listed field;
+	// for the clear to reach the server the update merge must also zero the
+	// corresponding draft value so the Change carries the cleared state.
 	ClearFields []string
 }
 
@@ -615,12 +619,7 @@ func (c *httpClient) sendSyncCommands(ctx context.Context, folderID string, cmds
 // conditionally-serialized fields (location, attendees, reminder), which
 // would otherwise be omitted and left unchanged on the server.
 func (d EventDraft) clears(name string) bool {
-	for _, n := range d.ClearFields {
-		if n == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(d.ClearFields, name)
 }
 
 // buildEventApp renders a draft as an ApplicationData element. MS-ASAIRS
@@ -647,7 +646,9 @@ func buildEventApp(draft EventDraft) *wbxml.Element {
 	} else {
 		app.Children = append(app.Children, wbxml.E(wbxml.PageCalendar, "AllDayEvent", wbxml.Text("0")))
 	}
-	// Attendees (0x07)
+	// Attendees (0x07). A cleared attendee list serializes as an empty
+	// <Attendees/> (servers treat it as remove-all); because the list is
+	// empty, MeetingStatus below also drops to 0, de-meeting the item.
 	if len(draft.Attendees) > 0 || draft.clears("attendees") {
 		atts := wbxml.E(wbxml.PageCalendar, "Attendees")
 		for _, a := range draft.Attendees {

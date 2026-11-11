@@ -6,6 +6,8 @@ package eas
 import (
 	"testing"
 	"time"
+
+	"github.com/hstern/go-activesync/wbxml"
 )
 
 // TestBuildEventAppEmitsEmptyClearedFields guards the clear mechanism: a
@@ -25,8 +27,11 @@ func TestBuildEventAppEmitsEmptyClearedFields(t *testing.T) {
 	if loc == nil {
 		t.Fatal("no Location element for a cleared location")
 	}
-	if got := loc.TextContent(); got != "" {
-		t.Errorf("cleared Location = %q, want empty", got)
+	if len(loc.Children) != 1 {
+		t.Fatalf("cleared Location has %d children, want 1 (an empty text child)", len(loc.Children))
+	}
+	if txt, ok := loc.Children[0].(wbxml.Text); !ok || string(txt) != "" {
+		t.Errorf("cleared Location child = %#v, want empty wbxml.Text", loc.Children[0])
 	}
 
 	atts := app.Find("Attendees")
@@ -48,5 +53,29 @@ func TestBuildEventAppEmitsEmptyClearedFields(t *testing.T) {
 	// Control: a non-cleared field is still serialized normally.
 	if got := app.Find("Subject").TextContent(); got != "keep" {
 		t.Errorf("Subject = %q, want keep", got)
+	}
+}
+
+// TestBuildEventApp_omitsUnsetUnclearedFields verifies that a field with
+// neither a value nor a clear request is omitted entirely (the pre-existing
+// behavior the || conditions must not break), and that a valued, non-cleared
+// field still serializes its value.
+func TestBuildEventApp_omitsUnsetUnclearedFields(t *testing.T) {
+	start := time.Date(2026, 11, 12, 8, 0, 0, 0, time.UTC)
+	// Nothing set, nothing cleared -> Location/Attendees/Reminder absent.
+	app := buildEventApp(EventDraft{Subject: "x", StartTime: start, EndTime: start.Add(time.Hour)})
+	if app.Find("Location") != nil {
+		t.Error("Location emitted though unset and uncleared")
+	}
+	if app.Find("Attendees") != nil {
+		t.Error("Attendees emitted though unset and uncleared")
+	}
+	if app.Find("Reminder") != nil {
+		t.Error("Reminder emitted though unset and uncleared")
+	}
+	// Valued, non-cleared -> value serialized normally.
+	app = buildEventApp(EventDraft{Subject: "x", Location: "Room 1", StartTime: start, EndTime: start.Add(time.Hour)})
+	if got := app.Find("Location").TextContent(); got != "Room 1" {
+		t.Errorf("Location = %q, want Room 1", got)
 	}
 }
