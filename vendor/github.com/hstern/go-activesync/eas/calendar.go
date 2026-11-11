@@ -442,9 +442,9 @@ func (c *httpClient) UpdateEvent(ctx context.Context, folderID, serverID string,
 // attendees, recurrence, time zone, ...) intact.
 //
 // Zero values double as the "leave unchanged" sentinel, matching EventDraft's
-// documented contract. The trade-off: a caller cannot explicitly reset a
-// field to its zero value (e.g. clear the location or set BusyStatus back to
-// free) through this path — those are indistinguishable from "not supplied".
+// documented contract. A caller who wants to reset a field to its default
+// instead lists it in `draft.ClearFields`; those fields are forced to their
+// zero value below, overriding any value seeded from the fetched state.
 func mergeEventDraft(current EventItem, draft EventDraft) EventDraft {
 	merged := EventDraft{
 		Subject:     current.Subject,
@@ -514,6 +514,25 @@ func mergeEventDraft(current EventItem, draft EventDraft) EventDraft {
 	if draft.UID != "" {
 		merged.UID = draft.UID
 	}
+	// Apply explicit clears last so they win over values seeded from the
+	// fetched state. Zeroing here is not sufficient on its own for the
+	// conditionally-serialized fields — buildEventApp must also emit an
+	// explicit empty element, which it does based on ClearFields.
+	for _, f := range draft.ClearFields {
+		switch f {
+		case "location":
+			merged.Location = ""
+		case "attendees":
+			merged.Attendees = nil
+		case "reminder":
+			merged.Reminder = 0
+		case "sensitivity":
+			merged.Sensitivity = 0
+		case "busy_status":
+			merged.BusyStatus = 0
+		}
+	}
+	merged.ClearFields = draft.ClearFields
 	return merged
 }
 

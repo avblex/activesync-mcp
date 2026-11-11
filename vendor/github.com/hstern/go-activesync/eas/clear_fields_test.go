@@ -79,3 +79,45 @@ func TestBuildEventApp_omitsUnsetUnclearedFields(t *testing.T) {
 		t.Errorf("Location = %q, want Room 1", got)
 	}
 }
+
+// TestMergeEventDraftClear verifies that clearing zeroes the affected fields
+// while preserving untouched ones, and that the clear list is carried through
+// so buildEventApp can emit the explicit empty elements.
+func TestMergeEventDraftClear(t *testing.T) {
+	current := EventItem{
+		Subject:     "keep",
+		Location:    "old-link",
+		BusyStatus:  2,
+		Sensitivity: 1,
+		Reminder:    15,
+		UID:         "abc",
+		Attendees:   []EventAttendee{{Email: "a@x"}},
+	}
+
+	m := mergeEventDraft(current, EventDraft{
+		ClearFields: []string{"location", "attendees", "reminder", "busy_status", "sensitivity"},
+	})
+	if m.Location != "" {
+		t.Errorf("Location not cleared: %q", m.Location)
+	}
+	if len(m.Attendees) != 0 {
+		t.Errorf("Attendees not cleared: %+v", m.Attendees)
+	}
+	if m.Reminder != 0 {
+		t.Errorf("Reminder not cleared: %d", m.Reminder)
+	}
+	if m.BusyStatus != 0 {
+		t.Errorf("BusyStatus not cleared: %d", m.BusyStatus)
+	}
+	if m.Sensitivity != 0 {
+		t.Errorf("Sensitivity not cleared: %d", m.Sensitivity)
+	}
+	// Untouched fields are preserved.
+	if m.Subject != "keep" || m.UID != "abc" {
+		t.Errorf("untouched fields lost: subj=%q uid=%q", m.Subject, m.UID)
+	}
+	// The clear list is carried through for buildEventApp.
+	if len(m.ClearFields) != 5 {
+		t.Errorf("ClearFields not carried: %+v", m.ClearFields)
+	}
+}
