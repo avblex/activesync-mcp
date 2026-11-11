@@ -119,15 +119,20 @@ Applied per generated occurrence on exact `ExceptionStartTime` match:
 - `Deleted=true` → occurrence dropped from the result.
 - Modified occurrence → fields overridden from the exception, only when
   present/non-zero: `Subject`, `Location`, `Body`, `BusyStatus>0`,
-  `Reminder>0`; times only when **both** `StartTime` and `EndTime` are set
-  (otherwise the computed time stands). Covers the common "moved to another
-  slot" case.
+  `Reminder>0`, `AllDayEvent=true`; times only when **both** `StartTime` and
+  `EndTime` are set (otherwise the computed time stands). Covers the common
+  "moved to another slot" case.
 
 ## Error handling
 
 The generator returns no errors. A malformed rule (zero interval, unknown
-type) simply yields no occurrences; the item then appears as its anchor row
-(degraded, not fatal). No new error codes; a list request never fails because
+type) simply yields no occurrences. **Anchor fallback:** whenever a recurring
+item expands to zero rows (no occurrence in the window — e.g. a series whose
+`Until` lies in the past — or a malformed rule), the MCP layer still emits the
+anchor row exactly as it does today, so a series never vanishes from the list
+silently (that disappearance is the very bug being fixed). The "hide the anchor
+when it is outside the window" rule applies only when the series *does* have
+in-window occurrences. No new error codes; a list request never fails because
 of one odd series.
 
 ## Testing
