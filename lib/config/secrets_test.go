@@ -40,8 +40,8 @@ func TestResolve_keyringNotFound(t *testing.T) {
 		Secret: SecretRef{KeyringService: "s", KeyringAccount: "u"},
 	}
 	_, err := r.Resolve(context.Background(), a)
-	if err == nil || !strings.Contains(err.Error(), "keyring set") {
-		t.Errorf("want hint to run keyring set, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "activesync-mcp setup") {
+		t.Errorf("want hint to run the setup TUI, got %v", err)
 	}
 }
 

@@ -1,8 +1,13 @@
 package store
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -356,6 +361,140 @@ func TestOpen_lockHeldByAnotherProcess(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "another activesync-mcp process") {
 		t.Errorf("err = %v; want one mentioning the other process", err)
+	}
+}
+
+func TestOpenPool_assignsAndReusesStableSlots(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+
+	first, err := OpenPool(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if first.Slot() != 1 {
+		t.Fatalf("first slot = %d, want 1", first.Slot())
+	}
+	if err := first.AccountState("work").SetPolicyKey(context.Background(), "K1"); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := OpenPool(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if second.Slot() != 2 {
+		t.Fatalf("second slot = %d, want 2", second.Slot())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state-2.db")); err != nil {
+		t.Fatalf("second stable state file: %v", err)
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reused, err := OpenPool(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reused.Close()
+	if reused.Slot() != 1 {
+		t.Fatalf("reused slot = %d, want 1", reused.Slot())
+	}
+	got, err := reused.AccountState("work").PolicyKey(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "K1" {
+		t.Fatalf("reused slot policy key = %q, want K1", got)
+	}
+}
+
+func TestOpenPool_exhaustionIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	first, err := OpenPool(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := OpenPool(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	if _, err := OpenPool(path, 2); !errors.Is(err, ErrLocked) {
+		t.Fatalf("third OpenPool error = %v, want ErrLocked", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state-3.db")); !os.IsNotExist(err) {
+		t.Fatalf("pool created an out-of-range state-3.db: %v", err)
+	}
+}
+
+func TestOpenPool_doesNotSkipNonLockError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenPool(path, 2); err == nil || errors.Is(err, ErrLocked) {
+		t.Fatalf("OpenPool error = %v; want a non-lock error", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state-2.db")); !os.IsNotExist(err) {
+		t.Fatalf("pool skipped a non-lock error and created state-2.db: %v", err)
+	}
+}
+
+func TestOpenPool_acrossProcesses(t *testing.T) {
+	if os.Getenv("ACTIVESYNC_STORE_HELPER") == "1" {
+		db, err := OpenPool(os.Getenv("ACTIVESYNC_STORE_PATH"), 2)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		defer db.Close()
+		fmt.Println(db.Slot())
+		_, _ = os.Stdin.Read(make([]byte, 1))
+		return
+	}
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	start := func() (*exec.Cmd, io.WriteCloser, int) {
+		t.Helper()
+		cmd := exec.Command(os.Args[0], "-test.run=^TestOpenPool_acrossProcesses$")
+		cmd.Env = append(os.Environ(), "ACTIVESYNC_STORE_HELPER=1", "ACTIVESYNC_STORE_PATH="+path)
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = stdin.Close()
+			_ = cmd.Wait()
+		})
+		scanner := bufio.NewScanner(stdout)
+		if !scanner.Scan() {
+			t.Fatalf("helper did not report slot: %v", scanner.Err())
+		}
+		var slot int
+		if _, err := fmt.Sscan(scanner.Text(), &slot); err != nil {
+			t.Fatal(err)
+		}
+		return cmd, stdin, slot
+	}
+	_, _, firstSlot := start()
+	_, _, secondSlot := start()
+	if firstSlot != 1 || secondSlot != 2 {
+		t.Fatalf("subprocess slots = %d, %d; want 1, 2", firstSlot, secondSlot)
 	}
 }
 

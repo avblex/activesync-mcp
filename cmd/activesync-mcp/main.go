@@ -9,6 +9,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -95,14 +97,15 @@ func runServe(argv []string, configPath *string, stderr *os.File) int {
 		return exitConfig
 	}
 
-	db, err := store.Open(filepath.Join(cfg.StateDir, "state.db"))
+	db, err := store.OpenPool(filepath.Join(cfg.StateDir, "state.db"), 4)
 	if err != nil {
 		fmt.Fprintf(stderr, "activesync-mcp: %v\n", err)
 		return exitConfig
 	}
 	defer db.Close()
+	scopeConfiguredDeviceIDs(cfg, db.Slot())
 
-	mgr, err := server.NewDefaultManager(cfg, db, hostnameSeed())
+	mgr, err := server.NewDefaultManager(cfg, db, deviceSeedForStateSlot(db.Slot()))
 	if err != nil {
 		fmt.Fprintf(stderr, "activesync-mcp: %v\n", err)
 		return exitConfig
@@ -151,9 +154,29 @@ func hostnameSeed() string {
 	return host + "|" + home
 }
 
+func deviceSeedForStateSlot(slot int) string {
+	return fmt.Sprintf("%s|state-slot-%d", hostnameSeed(), slot)
+}
+
+// scopeConfiguredDeviceIDs keeps manually configured device IDs distinct when
+// Claude starts concurrent servers. Slot one retains the configured identity;
+// later slots get a deterministic 32-hex identity tied to that stable slot.
+func scopeConfiguredDeviceIDs(cfg *config.Config, slot int) {
+	if slot <= 1 {
+		return
+	}
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].DeviceID == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s|state-slot-%d", cfg.Accounts[i].DeviceID, slot)))
+		cfg.Accounts[i].DeviceID = hex.EncodeToString(sum[:16])
+	}
+}
+
 // loadConfigOrHint wraps config.Load: on a "file not found" error it
 // prints a copy-pasteable bootstrap walkthrough on stderr (so a user
-// invoking `serve`/`doctor`/`keyring` for the first time isn't left
+// invoking `serve`/`doctor` for the first time isn't left
 // with a bare "no such file" message). On any other error it prints
 // the error verbatim. In either case the returned err is non-nil and
 // the caller should return exitConfig.

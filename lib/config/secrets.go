@@ -46,7 +46,7 @@ func (r *SecretResolver) Resolve(ctx context.Context, a *Account) (string, error
 		pw, err := r.Keyring(a.Secret.KeyringService, a.Secret.KeyringAccount)
 		if err != nil {
 			if errors.Is(err, keyring.ErrNotFound) {
-				return "", fmt.Errorf("keyring entry not set for service=%q account=%q (run: activesync-mcp keyring set --account %s)",
+				return "", fmt.Errorf("keyring entry not set for service=%q account=%q (run: activesync-mcp setup, then edit account %q)",
 					a.Secret.KeyringService, a.Secret.KeyringAccount, a.Name)
 			}
 			return "", fmt.Errorf("keyring lookup: %w", err)

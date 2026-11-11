@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hstern/go-activesync/eas"
@@ -36,25 +37,64 @@ const (
 	bucketFolders   = "folders"
 )
 
+// ErrLocked means another process currently owns the selected state file.
+// Callers may use errors.Is to distinguish contention from I/O or corruption.
+var ErrLocked = errors.New("state database is locked")
+
+const poolLockTimeout = 100 * time.Millisecond
+
 // DB wraps a single bbolt database serving all configured accounts.
 type DB struct {
-	db *bbolt.DB
+	db   *bbolt.DB
+	slot int
 }
 
 // Open creates or opens the bbolt file at path, creating the parent
 // directory if needed. Buckets are created on first open.
 func Open(path string) (*DB, error) {
+	return open(path, 1, 5*time.Second)
+}
+
+// OpenPool opens the first available file in a bounded, stable pool. Slot one
+// uses basePath; later slots insert "-N" before its extension. Stable names
+// preserve each process's EAS SyncKey and device identity across restarts.
+func OpenPool(basePath string, maxSlots int) (*DB, error) {
+	if maxSlots < 1 {
+		return nil, fmt.Errorf("store: open pool: max slots must be positive")
+	}
+	for slot := 1; slot <= maxSlots; slot++ {
+		db, err := open(poolPath(basePath, slot), slot, poolLockTimeout)
+		if err == nil {
+			return db, nil
+		}
+		if !errors.Is(err, ErrLocked) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("store: all %d state database slots are in use: %w", maxSlots, ErrLocked)
+}
+
+func poolPath(basePath string, slot int) string {
+	if slot == 1 {
+		return basePath
+	}
+	ext := filepath.Ext(basePath)
+	stem := strings.TrimSuffix(basePath, ext)
+	return fmt.Sprintf("%s-%d%s", stem, slot, ext)
+}
+
+func open(path string, slot int, timeout time.Duration) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("store: create state dir: %w", err)
 	}
-	bdb, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: 5 * time.Second})
+	bdb, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: timeout})
 	if err != nil {
 		// bbolt holds an exclusive flock on the database file, so a
 		// second activesync-mcp talking to the same state.db will see
-		// ErrTimeout after our 5s open budget. Surface the actual
+		// ErrTimeout after the caller's open budget. Surface the actual
 		// cause instead of the cryptic "timeout".
 		if errors.Is(err, bberrors.ErrTimeout) {
-			return nil, fmt.Errorf("store: open %s: another activesync-mcp process appears to be running (state.db is locked by another process; check `pgrep -af activesync-mcp` and stop the other instance, or point this one at a different state_dir in config.toml)", path)
+			return nil, fmt.Errorf("store: open %s: another activesync-mcp process appears to be running (state database is locked): %w", path, ErrLocked)
 		}
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
@@ -69,8 +109,11 @@ func Open(path string) (*DB, error) {
 		_ = bdb.Close()
 		return nil, fmt.Errorf("store: create buckets: %w", err)
 	}
-	return &DB{db: bdb}, nil
+	return &DB{db: bdb, slot: slot}, nil
 }
+
+// Slot returns the one-based stable pool slot owned by this handle.
+func (d *DB) Slot() int { return d.slot }
 
 // Close releases the file lock and flushes any in-flight writes.
 func (d *DB) Close() error { return d.db.Close() }

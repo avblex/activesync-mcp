@@ -310,6 +310,18 @@ func TestDefaultStateDir_xdgStateHome(t *testing.T) {
 	}
 }
 
+func TestDefaultStateDir_homeFallbackIsStable(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
+	got := defaultStateDir()
+	wantSuffix := filepath.Join(".local", "state", "activesync-mcp")
+	if !strings.HasSuffix(got, wantSuffix) {
+		t.Fatalf("got %q; want a path ending in %q", got, wantSuffix)
+	}
+	if strings.Contains(filepath.Base(got), "pid-") {
+		t.Fatalf("state directory must be stable across processes: %q", got)
+	}
+}
+
 func TestSecretValidate_emptyCommandName(t *testing.T) {
 	src := `
 [[account]]

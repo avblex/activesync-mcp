@@ -24,7 +24,7 @@ import (
 
 // TestE2E_FirstRunSequence orchestrates the full setup journey end to
 // end: write a config that references a keyring entry → store the
-// password via `keyring set` → run `doctor` → spawn `serve` and call
+// password in the OS keyring (as `setup` would) → run `doctor` → spawn `serve` and call
 // accounts_list → SIGTERM the serve process. Catches integration
 // failures across the keyring → secret-resolution → manager → MCP →
 // signal-handling chain that no narrower test would surface.
@@ -56,14 +56,10 @@ default_access   = "rw"
 		t.Fatal(err)
 	}
 
-	// 1. keyring set with the testenv password piped on stdin.
-	setCmd := exec.Command(bin, "keyring", "set", "--account", "test", "--config", cfgPath)
-	setCmd.Stdin = strings.NewReader("integration\n")
-	var setOut, setErr bytes.Buffer
-	setCmd.Stdout = &setOut
-	setCmd.Stderr = &setErr
-	if err := setCmd.Run(); err != nil {
-		t.Fatalf("keyring set: %v\nstdout: %s\nstderr: %s", err, setOut.String(), setErr.String())
+	// 1. Store the testenv password in the OS keyring the way the setup
+	// TUI would (the `keyring` subcommand was replaced by setup).
+	if err := keyring.Set(svc, acct, "integration"); err != nil {
+		t.Fatalf("keyring set: %v", err)
 	}
 	t.Cleanup(func() { _ = keyring.Delete(svc, acct) })
 

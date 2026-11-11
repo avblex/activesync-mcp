@@ -4,7 +4,41 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"activesync-mcp/lib/config"
 )
+
+func TestDeviceSeedForStateSlot(t *testing.T) {
+	first := deviceSeedForStateSlot(1)
+	second := deviceSeedForStateSlot(2)
+	if first == second {
+		t.Fatalf("state slots produced the same device seed %q", first)
+	}
+	if again := deviceSeedForStateSlot(1); again != first {
+		t.Fatalf("slot seed is not stable: %q then %q", first, again)
+	}
+}
+
+func TestScopeConfiguredDeviceIDsToStateSlot(t *testing.T) {
+	original := "0123456789abcdef0123456789abcdef"
+	first := &config.Config{Accounts: []config.Account{{Name: "work", DeviceID: original}}}
+	scopeConfiguredDeviceIDs(first, 1)
+	if first.Accounts[0].DeviceID != original {
+		t.Fatalf("slot 1 device ID changed: %q", first.Accounts[0].DeviceID)
+	}
+
+	second := &config.Config{Accounts: []config.Account{{Name: "work", DeviceID: original}}}
+	scopeConfiguredDeviceIDs(second, 2)
+	got := second.Accounts[0].DeviceID
+	if got == original || len(got) != 32 {
+		t.Fatalf("slot 2 device ID = %q; want a distinct 32-hex ID", got)
+	}
+	again := &config.Config{Accounts: []config.Account{{Name: "work", DeviceID: original}}}
+	scopeConfiguredDeviceIDs(again, 2)
+	if again.Accounts[0].DeviceID != got {
+		t.Fatalf("slot 2 device ID is not stable: %q then %q", got, again.Accounts[0].DeviceID)
+	}
+}
 
 func TestSplitSubcommand(t *testing.T) {
 	cases := []struct {

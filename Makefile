@@ -60,7 +60,9 @@ lint: gofmt-check vet tidy-check vulncheck ## Static checks (no side effects)
 
 .PHONY: gofmt-check
 gofmt-check: ## Fail if any file would be modified by gofmt
-	@out=$$(gofmt -l .); \
+	@out=$$({ find . -path ./vendor -prune -o -name '*.go' -print; \
+		find vendor/github.com/hstern/go-activesync/eas -maxdepth 1 -name '*.go' -print; \
+	} | xargs gofmt -l); \
 	if [ -n "$$out" ]; then \
 		echo "gofmt drift in:"; echo "$$out"; \
 		echo "run: make fmt"; \
@@ -69,7 +71,8 @@ gofmt-check: ## Fail if any file would be modified by gofmt
 
 .PHONY: fmt
 fmt: ## gofmt -w on every Go file
-	gofmt -w .
+	find . -path ./vendor -prune -o -name '*.go' -print | xargs gofmt -w
+	find vendor/github.com/hstern/go-activesync/eas -maxdepth 1 -name '*.go' -exec gofmt -w {} +
 
 .PHONY: vet
 vet: ## go vet
@@ -100,6 +103,7 @@ build: ## Build ./activesync-mcp from cmd/activesync-mcp
 .PHONY: test
 test: ## Race detector + coverage (matches CI)
 	go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+	go test -race -count=1 github.com/hstern/go-activesync/eas
 	@go tool cover -func=coverage.out | tail -5
 
 .PHONY: cover
